@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>TGL — OpenGL ES 3.2 for iOS</title>
+
+    <!-- Core Theme (docsify v5, pinned major per docsify.js.org quickstart) -->
+    <link
+      rel="stylesheet"
+      href="//cdn.jsdelivr.net/npm/docsify@5/dist/themes/core.min.css"
+    />
+  </head>
+  <body class="loading">
+    <div id="app"></div>
+
+    <!-- Configuration (bilingual: /vi/ + /en/, folder per language) -->
+    <script>
+      window.$docsify = {
+        name: 'TGL — OpenGL ES 3.2 for iOS',
+        repo: '',
+        loadSidebar: true,
+        loadNavbar: true,
+        coverpage: true,
+        onlyCover: false,
+        auto2top: true,
+        subMaxLevel: 3,
+        fallbackLanguages: ['en'],
+        search: {
+          maxAge: 86400000,
+          paths: 'auto',
+          placeholder: {
+            '/vi/': 'Tìm kiếm...',
+            '/en/': 'Type to search...',
+            '/': 'Type to search...',
+          },
+          noData: {
+            '/vi/': 'Không tìm thấy!',
+            '/en/': 'No results!',
+            '/': 'No results!',
+          },
+        },
+      };
+    </script>
+
+    <!-- Docsify.js -->
+    <script src="//cdn.jsdelivr.net/npm/docsify@5"></script>
+
+    <!-- Plugins -->
+    <script src="//cdn.jsdelivr.net/npm/docsify@5/dist/plugins/search.min.js"></script>
+  </body>
+</html>
