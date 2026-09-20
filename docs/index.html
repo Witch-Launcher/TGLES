@@ -6,25 +6,209 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
+    <meta name="color-scheme" content="light dark" />
     <title>TGL — OpenGL ES 3.2 for iOS</title>
+
+    <!-- Theme before first paint: stored choice, else OS preference. -->
+    <script>
+      try {
+        var tglTheme =
+          localStorage.getItem('tgl-docs-theme') ||
+          (window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light');
+        document.documentElement.setAttribute('data-theme', tglTheme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    </script>
 
     <!-- Core Theme (docsify v5, pinned major per docsify.js.org quickstart) -->
     <link
       rel="stylesheet"
       href="//cdn.jsdelivr.net/npm/docsify@5/dist/themes/core.min.css"
     />
+    <style>
+      /* Dark mode: the v5 core theme derives every grayscale ramp from
+         --color-bg/--color-text and accents from --theme-color, so
+         overriding these three flips the whole site (verified against
+         core.min.css: only button/charm text hardcodes #fff, correct on
+         both modes). */
+      html[data-theme='dark'] {
+        --color-bg: #16181d;
+        --color-text: #d8dbe0;
+        --theme-color: #4da3ff;
+        /* Strong text mixes toward white here (the default mixes toward
+           black, which turns headings muddy on a dark background). */
+        --strong-color: color-mix(in srgb, var(--color-text), #fff 25%);
+        color-scheme: dark;
+      }
+      /* Professional tables, both themes: tinted header with an accent
+         rule, zebra rows, roomy top-aligned cells, hover highlight.
+         Specificity beats the core td/th rule (0,1,1): thead/tbody
+         qualifiers raise ours to (0,1,2). */
+      .markdown-section thead th {
+        background: var(--theme-color-2);
+        color: var(--color-text);
+        padding: 0.6em 0.9em;
+        border-bottom: 2px solid var(--theme-color);
+        white-space: nowrap;
+      }
+      .markdown-section tbody td {
+        padding: 0.55em 0.9em;
+        vertical-align: top;
+      }
+      .markdown-section tbody tr:nth-child(even) td {
+        background: var(--color-mono-1);
+      }
+      /* Inline code chips share the zebra bg, so lift them one step. */
+      .markdown-section tbody tr:nth-child(even) td code {
+        background: var(--color-mono-2);
+      }
+      .markdown-section tbody tr:hover td {
+        background: var(--theme-color-1);
+      }
+      /* ---- Landing hero redesign (explicit staged backdrop per theme,
+         so hero text never depends on the page background). The cover
+         shows on the landing route only; its last paragraph holds the
+         language links, styled here as primary/secondary pills. ---- */
+      :root {
+        --cover-btn-bg: var(--theme-color);
+      }
+      html[data-theme='dark'] {
+        --cover-btn-bg: #1f6feb;
+      }
+      .cover {
+        background: linear-gradient(
+          165deg,
+          #f3f7fc 0%,
+          #e4edf8 48%,
+          #d9e6f5 100%
+        );
+      }
+      html[data-theme='dark'] .cover {
+        background:
+          radial-gradient(
+            90% 70% at 50% 0%,
+            rgba(77, 163, 255, 0.16),
+            transparent 70%
+          ),
+          linear-gradient(180deg, #1a2440 0%, #131a2e 55%, #0d1222 100%);
+      }
+      /* The default vignette is replaced by the backdrops above. */
+      .cover:before {
+        display: none;
+      }
+      .cover h1 {
+        letter-spacing: 0.01em;
+      }
+      html[data-theme='dark'] .cover h1 {
+        text-shadow:
+          0 0 28px rgba(77, 163, 255, 0.35),
+          0 2px 12px rgba(0, 0, 0, 0.5);
+      }
+      /* Tagline as a tinted card instead of a bare quote. */
+      .cover blockquote {
+        background: color-mix(in srgb, var(--theme-color) 10%, transparent);
+        border: 1px solid
+          color-mix(in srgb, var(--theme-color) 28%, transparent);
+        border-radius: 14px;
+        padding: 1rem 1.6rem;
+      }
+      .cover .cover-main ul li {
+        color: var(--color-text);
+        opacity: 0.85;
+      }
+      .cover .cover-main ul li::before {
+        content: '▸ ';
+        color: var(--theme-color);
+      }
+      .cover .cover-main > p:last-child {
+        margin-top: 1.75rem;
+      }
+      .cover .cover-main > p:last-child a {
+        display: inline-block;
+        margin: 0 0.3em;
+        padding: 0.55em 1.6em;
+        border-radius: 999px;
+        font-weight: 600;
+        text-decoration: none;
+        border: 2px solid var(--theme-color);
+        transition:
+          transform 0.15s ease,
+          box-shadow 0.15s ease,
+          background 0.15s ease;
+      }
+      .cover .cover-main > p:last-child a:first-child {
+        background: var(--cover-btn-bg);
+        border-color: transparent;
+        color: #fff;
+        box-shadow: 0 6px 20px rgba(11, 133, 215, 0.3);
+      }
+      .cover .cover-main > p:last-child a:last-child {
+        color: var(--theme-color);
+      }
+      .cover .cover-main > p:last-child a:hover {
+        transform: translateY(-1px);
+      }
+      /* Text-only theme toggle, bottom-right (clear of navbar/search). */
+      #tgl-theme-toggle {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 999;
+        padding: 6px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--border-color, #ccc);
+        background: var(--color-bg);
+        color: var(--color-text);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        opacity: 0.92;
+      }
+      #tgl-theme-toggle:hover {
+        opacity: 1;
+        border-color: var(--theme-color);
+      }
+    </style>
   </head>
   <body class="loading">
-    <div id="app"></div>
+    <!-- Fallback when Docsify cannot boot (file:// or blocked CDN):
+         without this the page is a white void. Replaced on boot. -->
+    <div id="app">
+      <p style="padding: 2rem; font-family: system-ui, sans-serif">
+        Loading TGL docs… If this stays blank, serve over HTTP
+        (<code>docsify serve docs</code> → http://localhost:3000) instead
+        of opening the file directly — Docsify cannot fetch pages from
+        <code>file://</code> URLs.<br />
+        Vẫn trắng? Hãy chạy <code>docsify serve docs</code> rồi mở
+        http://localhost:3000 thay vì mở file trực tiếp.
+      </p>
+    </div>
+    <button
+      id="tgl-theme-toggle"
+      type="button"
+      aria-label="Toggle dark/light theme"
+    >
+      Dark / Tối
+    </button>
 
-    <!-- Configuration (bilingual: /vi/ + /en/, folder per language) -->
+    <!-- Configuration (English-first landing: /, bilingual: /vi/ + /en/) -->
     <script>
       window.$docsify = {
         name: 'TGL — OpenGL ES 3.2 for iOS',
         repo: '',
         loadSidebar: true,
         loadNavbar: true,
-        coverpage: true,
+        // Per-language covers: boolean `true` would only ever render the
+        // root _coverpage.md (landing), leaving /vi/ and /en/ coverless.
+        // Object form gives each language its own hero.
+        coverpage: {
+          '/': '_coverpage.md',
+          '/vi/': '_coverpage.md',
+          '/en/': '_coverpage.md',
+        },
         onlyCover: false,
         auto2top: true,
         subMaxLevel: 3,
@@ -51,5 +235,44 @@
 
     <!-- Plugins -->
     <script src="//cdn.jsdelivr.net/npm/docsify@5/dist/plugins/search.min.js"></script>
+
+    <!-- Theme toggle: label names the action, in both languages. -->
+    <script>
+      (function () {
+        var KEY = 'tgl-docs-theme';
+        function stored() {
+          try {
+            return localStorage.getItem(KEY);
+          } catch (e) {
+            return null;
+          }
+        }
+        function current() {
+          return (
+            document.documentElement.getAttribute('data-theme') || 'light'
+          );
+        }
+        function label(theme) {
+          return theme === 'dark' ? 'Light / Sáng' : 'Dark / Tối';
+        }
+        function apply(theme) {
+          document.documentElement.setAttribute('data-theme', theme);
+          var btn = document.getElementById('tgl-theme-toggle');
+          if (btn) btn.textContent = label(theme);
+          try {
+            localStorage.setItem(KEY, theme);
+          } catch (e) {}
+        }
+        apply(stored() || current());
+        document.addEventListener('click', function (e) {
+          if (e.target && e.target.id === 'tgl-theme-toggle') {
+            apply(current() === 'dark' ? 'light' : 'dark');
+          }
+        });
+        window.addEventListener('hashchange', function () {
+          apply(current());
+        });
+      })();
+    </script>
   </body>
 </html>

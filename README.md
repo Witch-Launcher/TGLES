@@ -173,11 +173,12 @@ the depth test runs (probed, documented, tested).
 - **Khronos Group** — OpenGL ES 3.2, GLSL ES 3.20, EGL 1.5 specifications
   and headers in `docs/reference/` (verification ground truth).
 - **Apple** — Metal API + Metal Feature Set Tables (May 2026).
-- **MobileGL-Dev / MobileGlues / PojavLauncher iOS** — host-contract
+- **MobileGL-Dev / MobileGlues / PojavLauncher/ Amethyst iOS** — host-contract
   research (DirectGLES loader, EGL surface, CPS substrate notes).
 - **Docsify.js** — bilingual docs site.
 - No third-party code is vendored; `docs/reference/` holds specs and
   headers only.
+- By DuyAnh662(Za_d626) - Witch launcher
 
 ## License
 
