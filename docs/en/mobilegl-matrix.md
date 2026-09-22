@@ -59,4 +59,21 @@ validation runs on A-series iPhones.
 
 `HostReadyForMobileGl()` returns `false` plus the gap list until no Missing
 gate remains — that is the meter for "when TGL supports the MobileGL bar".
-Gate details live in `src/mobilegl_support.cpp`.
+Gate details live in `src/support/mobilegl_support.cpp`.
+
+## Loader contract (verified from upstream, not assumed)
+
+Read at `MobileGL/MG_Util/BackendLoaders/OpenGL/Loader.cpp` @ `fff9d639`
+(2026-09-16; re-fetch with `tools/mobilegl/parse_host_contract.py`):
+
+- GLES resolves through **`eglGetProcAddress`** (`AcquireGLESFunctions`);
+  null logs `Failed to load GLES function`. Optional names
+  (`INIT_GLES_FUNC_OPTIONAL`) may stay null.
+- EGL resolves with **`dlsym` on the dlopened library**: `libEGL.so.1` /
+  `libEGL.so` on Linux, **`libtinygl4angle.dylib`** on iOS
+  (`MOBILEGL_IOS`); a null there is fatal (`MGLOG_F`).
+- **Stock macOS has no DirectGLES path** — `OpenLib`/`ProcAddress` return
+  null under `__APPLE__` without `MOBILEGL_IOS`. macOS bring-up therefore
+  means the surfaceless EGL platform (see `conformance.md`); iOS bring-up
+  means `libtinygl4angle.dylib` + the same `eglGetProcAddress` table TGL
+  already serves (`src/host/abi/dispatch.cpp`, single table by design).

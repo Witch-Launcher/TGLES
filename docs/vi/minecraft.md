@@ -45,7 +45,7 @@ EGL, `POJAV_RENDERER`).
 1. **Present**: state machine EGL đã xong (`EglState`); cầu ObjC++
    `tgles_metal_bridge` đã **presentDrawable thật + pixel thật**
    (device-verified trên host Metal) — còn run validation trên iPhone
-   A-series với layer thật của app (xem [Tầng EGL 1.5](egl.md)).
+    A-series với layer thật của app (xem [Kiến trúc](architecture.md)).
 2. **Metal execution bridge**: MSL compile + PSO + draw + blit/readback +
    fence ring đều đã chạy thật trên GPU (`tests/test_metal_device.mm`);
    wiring app→bridge (`GlesContext::RenderFrame`: VAO float attribs +

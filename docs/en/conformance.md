@@ -1,27 +1,43 @@
 # Conformance
 
-## Goal
+## In-repo gates (run first, seconds)
 
-Pass the **Khronos CTS / dEQP ES 3.2** suite (`cts-runner --type=es32`) on iOS.
+```sh
+cmake -S . -B build && cmake --build build
+ctest --test-dir build --output-on-failure   # 274 tests, incl. CTS subset + host contract
+python3 tools/cts/preflight.py --lib build/libtgles.dylib
+```
 
-## Strategy (spec-driven, not plan-driven)
+- `tests/cts/test_cts_subset.cpp`: Khronos CTS ES32-group subset (state rules the suite must obey).
+- `tests/host/test_abi_contract.cpp`: every contract name via `dlsym` + `eglGetProcAddress`, F5 surfaceless sequence, `EXTENSIONS` honesty, gap budget.
+- `tools/cts/preflight.py`: the same F5 over `ctypes`, no rebuild needed — the farmer's gate before building all of CTS.
 
-1. **Unit + integration in the repo** (`tests/`): one test file per step,
-   run with `ctest` on macOS Intel.
-2. **iOS cross-compile**: `iphoneos` (device) + `iphonesimulator`, deployment
-   target iOS 14.0 (A9/Apple3 is the lowest baseline).
-3. **CTS**: build the dEQP framework, `fetch_sources.py`, run `--type=es32`
-   on a device farm, waivers per the Khronos Adopter process when needed.
-4. **Benchmarks**: FPS / CPU / GPU for heavy draw calls, post-processing,
-   compute shaders; compared against native Metal (not against "native
-   OpenGL ES on Android" as the old plan suggested).
+## Khronos CTS on macOS (surfaceless)
 
-## Status
+The CTS OSX platform offers desktop CGL profiles only, so ES runs use the
+surfaceless platform (`tcuSurfacelessPlatform.cpp`): `GetDisplay(NULL)` →
+`Initialize` → `ChooseConfig(R3+PBUFFER)` → `GetConfigAttrib` → `CreateContext`
+→ `CreatePbufferSurface(WIDTH,HEIGHT)` → `MakeCurrent`, with `DYLD_LIBRARY_PATH`
+pointing at a `libEGL.so` symlink to our dylib.
 
-- All 10 steps: unit tests green on macOS (**137 tests, 740 checks**).
-- Every step cross-compiles cleanly for `iphoneos` (arm64) +
-  `iphonesimulator` (x86_64), deployment target iOS 14.0.
-- `GlesContext::ConformanceChecklist()` (step 10) encodes all minimums
-  and plan corrections as automatic gates — empty array = pass.
-- Full CTS (`--type=es32`): runs on a device farm with dEQP once devices
-  are available; the in-repo checklist is the pre-CTS gate.
+```sh
+sh tools/cts/build_es32.sh --cts-dir ./cts --lib $PWD/build/libtgles.dylib
+DYLD_LIBRARY_PATH=./cts/build ./cts/build/cts-runner --type=es32
+```
+
+Groups come from `docs/reference/cts/ES32_GROUPS.md`.
+
+## Reading a failure
+
+| Class | Meaning | Where to look |
+|---|---|---|
+| Preflight FAIL | Library shape wrong (missing symbol, sentinel, bad string) | `host-abi.md`, ledger |
+| CTS listado `NonConformance` on a gap name | Call recorded, not executed | `tglesAbiGapCalls(name)` count |
+| Pixel mismatch on RGBA8 paths | CPU unpacker vs GPU | `tests/state/test_texture_upload.cpp` |
+| `eglGetProcAddress` NULL for a required name | Dispatch table drift | `gen_gl_abi.py --check` |
+
+## Status (honest)
+
+In-repo gates green (274/274). No full `--type=es32` pass rate is claimed:
+the ledger reports the true gap per call (341 declared), and a pass rate
+follows GPU execution work, not paperwork.

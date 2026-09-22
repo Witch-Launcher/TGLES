@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "cube_model.h"
-#include "tgles/gles.h"
-#include "tgles/metal_bridge_apple.h"
+#include "tgles/facade/gles.h"
+#include "tgles/gpu/metal_bridge_apple.h"
 
 namespace {
 

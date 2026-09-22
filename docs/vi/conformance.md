@@ -1,27 +1,43 @@
 # Conformance
 
-## Mục tiêu
+## Gate trong repo (chạy trước, vài giây)
 
-Pass bộ **Khronos CTS / dEQP ES 3.2** (`cts-runner --type=es32`) trên iOS.
+```sh
+cmake -S . -B build && cmake --build build
+ctest --test-dir build --output-on-failure   # 274 tests, gồm CTS subset + host contract
+python3 tools/cts/preflight.py --lib build/libtgles.dylib
+```
 
-## Chiến lược (theo spec, không theo plan cũ)
+- `tests/cts/test_cts_subset.cpp`: subset nhóm ES32 của Khronos CTS (luật state mà suite bắt tuân theo).
+- `tests/host/test_abi_contract.cpp`: mọi tên contract qua `dlsym` + `eglGetProcAddress`, chuỗi F5 surfaceless, honesty `EXTENSIONS`, budget gap.
+- `tools/cts/preflight.py`: chạy đúng F5 qua `ctypes`, không cần rebuild — gate cho farmer trước khi build cả CTS.
 
-1. **Unit + integration trong repo** (`tests/`): mỗi bước 1 file test,
-   chạy bằng `ctest` trên macOS Intel.
-2. **Cross-compile iOS**: `iphoneos` (device) + `iphonesimulator`, deployment
-   target iOS 14.0 (A9/Apple3 là baseline thấp nhất).
-3. **CTS**: build dEQP framework, `fetch_sources.py`, chạy `--type=es32` trên
-   farm thiết bị, waiver theo quy trình Khronos Adopter khi cần.
-4. **Benchmark**: FPS / CPU / GPU cho draw-call nặng, post-processing,
-   compute shader; so với Metal thuần (không so với "OpenGL ES native trên
-   Android" như plan cũ viết).
+## CTS Khronos trên macOS (surfaceless)
 
-## Tình trạng
+Platform OSX của CTS chỉ có desktop CGL profiles, nên chạy ES phải dùng
+surfaceless platform (`tcuSurfacelessPlatform.cpp`): `GetDisplay(NULL)` →
+`Initialize` → `ChooseConfig(R3+PBUFFER)` → `GetConfigAttrib` → `CreateContext`
+→ `CreatePbufferSurface(WIDTH,HEIGHT)` → `MakeCurrent`, với `DYLD_LIBRARY_PATH`
+trỏ vào symlink `libEGL.so` tới dylib của mình.
 
-- Toàn bộ 10 bước: unit tests xanh trên macOS (**137 tests, 740 checks**).
-- Mỗi bước đều cross-compile sạch cho `iphoneos` (arm64) +
-  `iphonesimulator` (x86_64), deployment target iOS 14.0.
-- `GlesContext::ConformanceChecklist()` (step 10) encode toàn bộ minimums
-  và plan-corrections thành gate tự động — mảng rỗng = đạt.
-- CTS full (`--type=es32`): chạy trên farm thiết bị với dEQP khi có device;
-  checklist trong repo là gate trước CTS.
+```sh
+sh tools/cts/build_es32.sh --cts-dir ./cts --lib $PWD/build/libtgles.dylib
+DYLD_LIBRARY_PATH=./cts/build ./cts/build/cts-runner --type=es32
+```
+
+Danh sách group lấy từ `docs/reference/cts/ES32_GROUPS.md`.
+
+## Đọc một failure
+
+| Loại | Nghĩa | Xem ở đâu |
+|---|---|---|
+| Preflight FAIL | Hình dạng library sai (thiếu symbol, sentinel, string xấu) | `host-abi.md`, ledger |
+| CTS `NonConformance` ở tên gap | Call đã ghi nhận, chưa chạy | `tglesAbiGapCalls(name)` |
+| Lệch pixels ở đường RGBA8 | CPU unpacker vs GPU | `tests/state/test_texture_upload.cpp` |
+| `eglGetProcAddress` NULL ở tên required | Drift bảng dispatch | `gen_gl_abi.py --check` |
+
+## Trạng thái (trung thực)
+
+Gate trong repo xanh (274/274). Chưa claim tỉ lệ pass `--type=es32`:
+ledger báo gap thật theo từng call (341 khai báo), tỉ lệ pass đi sau việc
+chạy GPU, không đi sau giấy tờ.

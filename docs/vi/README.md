@@ -11,7 +11,7 @@ complete, 3.1/3.2 in-progress).
 ## Nguyên tắc làm việc
 
 1. **Không tin 100% vào plan gốc** — mọi claim đối chiếu spec trong
-   `docs/reference/` (xem [Báo cáo kiểm chứng](verification.md)).
+   `docs/reference/` (xem [Host ABI](host-abi.md)).
 2. **Test-first**: viết test C/C++ trước, implementation sau.
 3. **Từng bước một**: xong bước nào, test kỹ bước đó đạt chuẩn spec mới qua
    bước khác.

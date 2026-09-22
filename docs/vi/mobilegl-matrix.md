@@ -57,4 +57,21 @@ wiring VAO/FBO của app vào bridge + run validation trên iPhone A-series.
 
 `HostReadyForMobileGl()` trả `false` + danh sách gaps cho tới khi hết
 Missing — đó là thước đo "khi nào TGL hỗ trợ chuẩn MobileGL".
-Chi tiết từng gate xem `src/mobilegl_support.cpp`.
+Chi tiết từng gate xem `src/support/mobilegl_support.cpp`.
+
+## Contract của loader (đã đọc source upstream, không đoán)
+
+Tại `MobileGL/MG_Util/BackendLoaders/OpenGL/Loader.cpp` @ `fff9d639`
+(2026-09-16; fetch lại bằng `tools/mobilegl/parse_host_contract.py`):
+
+- GLES resolve qua **`eglGetProcAddress`** (`AcquireGLESFunctions`);
+  null thì log `Failed to load GLES function`. Tên optional
+  (`INIT_GLES_FUNC_OPTIONAL`) được phép null.
+- EGL resolve bằng **`dlsym` trên library đã dlopen**: Linux là `libEGL.so.1` /
+  `libEGL.so`, iOS là **`libtinygl4angle.dylib`** (`MOBILEGL_IOS`); null ở đây
+  là fatal (`MGLOG_F`).
+- **macOS stock không có đường DirectGLES** — `OpenLib`/`ProcAddress` trả null
+  dưới `__APPLE__` mà không có `MOBILEGL_IOS`. Bring-up macOS vì vậy đi qua EGL
+  surfaceless (xem `conformance.md`); bring-up iOS đi qua
+  `libtinygl4angle.dylib` + đúng bảng `eglGetProcAddress` mà TGL đã phục vụ
+  (`src/host/abi/dispatch.cpp`, một bảng theo thiết kế).

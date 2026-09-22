@@ -4,5 +4,6 @@
 - [English](/en/)
 - [Tiếng Việt](/vi/)
 - [Detailed roadmap](en/roadmap.md)
-- [Plan verification report](en/verification.md)
+- [Architecture](en/architecture.md)
+- [Host ABI](en/host-abi.md)
 - [Interactive test window](en/viewer.md)

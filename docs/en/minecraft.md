@@ -46,7 +46,7 @@ on 3.2, minimum 3.0", `MobileGL-Dev/MobileGlues-release`), PojavLauncher iOS
    bridge `tgles_metal_bridge` already does **real presentDrawable with real
    pixels** (device-verified on host Metal) — what remains is a validation
    run on an A-series iPhone with the app's real layer
-   (see [EGL 1.5 layer](egl.md)).
+    (see [Architecture](architecture.md)).
 2. **Metal execution bridge**: MSL compile + PSO + draw + blit/readback +
    fence ring all run for real on the GPU (`tests/test_metal_device.mm`);
    app→bridge wiring (`GlesContext::RenderFrame`: VAO float attribs +

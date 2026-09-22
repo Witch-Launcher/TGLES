@@ -10,6 +10,7 @@ cmake_install.cmake
 CTestTestfile.cmake
 Makefile
 Testing/
+/plan/
 
 # Headless trial frame dumps (regenerable; PNG illustrations in
 # assets/screenshots/ ARE committed).

@@ -11,7 +11,7 @@ a Metal backend, reach conformance, and replace MetalANGLE (ES 3.0 complete,
 ## Working principles
 
 1. **Never trust the original plan blindly** — every claim is checked against
-   the specs in `docs/reference/` (see [Verification report](verification.md)).
+   the specs in `docs/reference/` (see [Host ABI](host-abi.md)).
 2. **Test-first**: C/C++ tests are written before the implementation.
 3. **One step at a time**: a step is done only when its tests pass against
    the spec.
