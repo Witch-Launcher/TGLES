@@ -65,7 +65,7 @@ enum : unsigned {
   GLE_ARRAY_BUFFER = 0x8892,        // gl32.h
   GLE_STATIC_DRAW = 0x88E4,         // gl32.h
   GLE_DYNAMIC_DRAW = 0x88E8,        // gl32.h
-  GLE_FRAMEBUFFER = 0x8CA9,         // gl32.h
+  GLE_FRAMEBUFFER = 0x8D40,         // gl32.h GL_FRAMEBUFFER (both bindings).
   GLE_DRAW_FRAMEBUFFER = 0x8CA9,    // gl32.h
   GLE_COLOR_ATTACHMENT0 = 0x8CE0,   // gl32.h
   GLE_DEPTH_ATTACHMENT = 0x8D00,    // gl32.h

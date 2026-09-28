@@ -147,6 +147,7 @@ GLboolean Context::IsEnabled(GLenum cap) {
 
 GLenum Context::GetError() { return errors_.Get(); }
 bool Context::HasPending() const { return errors_.HasPending(); }
+void Context::RecordError(GLenum code) { errors_.Record(code); }
 
 const GLubyte* Context::GetString(GLenum name) const {
   switch (name) {

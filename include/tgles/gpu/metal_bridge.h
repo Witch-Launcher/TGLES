@@ -113,7 +113,15 @@ class MetalBridge {
                                       const char* family) = 0;
 
   // Frame + encoder ordering (mirrors backend::CommandPlan).
+  // BeginFrame starts a frame and sizes the offscreen target. When a frame
+  // is already open at the SAME size (multi-draw before eglSwapBuffers),
+  // BeginFrame is not called again — the facade reuses the open frame and
+  // opens subsequent passes with BeginRenderPassNoClear (first pass of a
+  // fresh frame clears with SetClearColor / glClearColor).
   virtual bool BeginFrame(GLsizei width, GLsizei height) = 0;
+  virtual bool FrameOpen() const = 0;
+  virtual GLsizei TargetWidth() const = 0;
+  virtual GLsizei TargetHeight() const = 0;
   virtual void BeginRenderPass() = 0;
   // Draws the uploaded vertex stream with the given GL topology. Executable:
   // POINTS, LINES, LINE_STRIP, TRIANGLES, TRIANGLE_STRIP (LINE_LOOP and
@@ -125,6 +133,17 @@ class MetalBridge {
   virtual bool CommitFrame() = 0;
   virtual bool Committed() const = 0;
   virtual GLuint DrawCount() const = 0;
+  // Clear color for the next BeginRenderPass (spec 17.3 glClearColor).
+  // Applied only when the pass clears (first pass of a frame); subsequent
+  // passes in the same frame use MTLLoadActionLoad and ignore this.
+  virtual void SetClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) = 0;
+  // What the NEXT BeginRenderPass clears. Both default to true (a bare
+  // bridge clears color+depth like the first GL pass of a frame). The facade
+  // turns COLOR off for a frame that only needs its depth buffer reset: the
+  // app's own per-frame clear lands on a different FBO and is deliberately
+  // not a window clear, so without this the depth buffer keeps last frame's
+  // values and every depth-tested draw fails silently.
+  virtual void SetClearAttachments(bool color, bool depth) = 0;
 
   // Vertex input for Draw (production path): interleaved float4
   // position+color pairs matching the MSL VertexIn layout
@@ -199,6 +218,11 @@ class MetalBridge {
   virtual void SetSamplerLod(GLuint unit, float min_lod, float max_lod) = 0;
   virtual void SetSamplerSlots(const GLuint* gl_units,
                                std::size_t count) = 0;
+  // Vertex-stage texture slot map (VTF / sample_lightmap): MSL vertex
+  // [[texture(i)]]/[[sampler(i)]] reads GL unit vertex_slots[i]. Independent
+  // of the fragment map (separate Metal index spaces). Empty clears the map.
+  virtual void SetVertexSamplerSlots(const GLuint* gl_units,
+                                     std::size_t count) = 0;
 
   // MRT: attachment count for the next frame (1..8, default 1). Must precede
   // BeginFrame (targets are sized there). Out-of-range fails closed.
@@ -263,6 +287,12 @@ class MetalBridge {
   // Pixel readback of the current frame target (device-only; the Mock
   // has no rasterizer and fails these closed with INVALID_OPERATION).
   virtual bool ReadbackPixel(GLint x, GLint y, std::uint8_t out_rgba[4]) = 0;
+  // Diagnostics: read one texel of the texture uploaded for GL unit `unit`
+  // (Metal stores BGRA; converted to RGBA here). Separates "the app gave us
+  // transparent bytes" from "the upload never reached the GPU" — the two
+  // look identical on screen (a draw that paints nothing).
+  virtual bool TextureProbe(GLuint unit, GLint x, GLint y,
+                            std::uint8_t out_rgba[4]) = 0;
   virtual bool BlitToCpu(void* dst, std::size_t bytes) = 0;
 
   // GPU-completion fence for a present serial (glFinish/FenceSync host
@@ -297,6 +327,9 @@ class NullMetalBridge : public MetalBridge {
                               GLenum internalformat,
                               const char* family) override;
   bool BeginFrame(GLsizei width, GLsizei height) override;
+  bool FrameOpen() const override;
+  GLsizei TargetWidth() const override;
+  GLsizei TargetHeight() const override;
   void BeginRenderPass() override;
   void Draw(GLenum mode) override;
   void EndRenderPass() override;
@@ -304,6 +337,8 @@ class NullMetalBridge : public MetalBridge {
   bool CommitFrame() override;
   bool Committed() const override;
   GLuint DrawCount() const override;
+  void SetClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) override;
+  void SetClearAttachments(bool color, bool depth) override;
   void SetVertexBytes(const void* data, std::size_t bytes,
                        std::uint32_t stride) override;
   void SetMVP(const float mvp[16]) override;
@@ -348,6 +383,8 @@ class NullMetalBridge : public MetalBridge {
                                  GLenum wrap_t) override;
   void SetSamplerLod(GLuint unit, float min_lod, float max_lod) override;
   void SetSamplerSlots(const GLuint* gl_units, std::size_t count) override;
+  void SetVertexSamplerSlots(const GLuint* gl_units,
+                             std::size_t count) override;
   void SetMrtCount(GLsizei n) override;
   bool ReadbackAttachment(GLuint index, GLint x, GLint y,
                            std::uint8_t out_rgba[4]) override;
@@ -362,6 +399,8 @@ class NullMetalBridge : public MetalBridge {
   bool StencilEnabled() const override;
   bool ReadbackPixel(GLint x, GLint y, std::uint8_t out_rgba[4]) override;
   bool BlitToCpu(void* dst, std::size_t bytes) override;
+  bool TextureProbe(GLuint unit, GLint x, GLint y,
+                    std::uint8_t out_rgba[4]) override;
   bool WaitForCompletion(std::uint64_t serial) override;
   void SetLayer(void* ca_metal_layer, GLsizei width,
                 GLsizei height) override;
@@ -374,6 +413,8 @@ class NullMetalBridge : public MetalBridge {
 
  private:
   ErrorQueue errors_;
+  GLsizei layer_width_ = 0;
+  GLsizei layer_height_ = 0;
 };
 
 // Test double: validates the contract without a GPU. Present advances the
@@ -404,6 +445,9 @@ class MockMetalBridge : public MetalBridge {
     return it == frag_slots_.end() ? -1 : it->second.kind;
   }
   std::size_t SamplerSlotCount() const { return sampler_slots_.size(); }
+  std::size_t VertexSamplerSlotCount() const {
+    return vertex_sampler_slots_.size();
+  }
   std::uint32_t CreateBuffer(GLsizeiptr size,
                              backend::StorageMode mode) override;
   bool IsBufferShared(std::uint32_t handle) const;
@@ -411,6 +455,9 @@ class MockMetalBridge : public MetalBridge {
                               GLenum internalformat,
                               const char* family) override;
   bool BeginFrame(GLsizei width, GLsizei height) override;
+  bool FrameOpen() const override;
+  GLsizei TargetWidth() const override;
+  GLsizei TargetHeight() const override;
   void BeginRenderPass() override;
   void Draw(GLenum mode) override;
   GLenum LastPrimitiveMode() const;
@@ -419,6 +466,8 @@ class MockMetalBridge : public MetalBridge {
   bool CommitFrame() override;
   bool Committed() const override;
   GLuint DrawCount() const override;
+  void SetClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) override;
+  void SetClearAttachments(bool color, bool depth) override;
   void SetVertexBytes(const void* data, std::size_t bytes,
                        std::uint32_t stride) override;
   void SetMVP(const float mvp[16]) override;
@@ -465,6 +514,8 @@ class MockMetalBridge : public MetalBridge {
   float SamplerMinLod(GLuint unit) const;
   float SamplerMaxLod(GLuint unit) const;
   void SetSamplerSlots(const GLuint* gl_units, std::size_t count) override;
+  void SetVertexSamplerSlots(const GLuint* gl_units,
+                             std::size_t count) override;
   void SetMrtCount(GLsizei n) override;
   bool ReadbackAttachment(GLuint index, GLint x, GLint y,
                            std::uint8_t out_rgba[4]) override;
@@ -474,6 +525,16 @@ class MockMetalBridge : public MetalBridge {
   void ConfigureCull(const CullConfig& config) override;
   void ConfigureViewport(const ViewportConfig& config) override;
   CullConfig LastCullConfig() const { return cull_cfg_; }
+  // Pass-kind counters: the facade decides clear-vs-load per frame, and that
+  // decision (not pixels) is what the window-source clear tests assert.
+  std::size_t PassClearCount() const { return pass_clear_count_; }
+  std::size_t PassLoadCount() const { return pass_load_count_; }
+  // Depth-only clear passes (color Loads): the facade's frame-start depth
+  // reset when the app's own clear is not a window clear.
+  std::size_t PassDepthClearCount() const { return pass_depth_clear_count_; }
+  // Color of the most recent SetClearColor: which color a forced clear pass
+  // used is what the "repaint with the last defined color" test asserts.
+  const GLfloat* LastClearColor() const { return clear_color_; }
   ViewportConfig LastViewportConfig() const { return viewport_cfg_; }
   void ConfigureDepth(const DepthConfig& config) override;
   bool DepthEnabled() const override;
@@ -483,6 +544,8 @@ class MockMetalBridge : public MetalBridge {
   DepthConfig LastDepthConfig() const;
   bool ReadbackPixel(GLint x, GLint y, std::uint8_t out_rgba[4]) override;
   bool BlitToCpu(void* dst, std::size_t bytes) override;
+  bool TextureProbe(GLuint unit, GLint x, GLint y,
+                    std::uint8_t out_rgba[4]) override;
   bool WaitForCompletion(std::uint64_t serial) override;
   void SetLayer(void* ca_metal_layer, GLsizei width,
                 GLsizei height) override;
@@ -504,6 +567,11 @@ class MockMetalBridge : public MetalBridge {
   bool frame_open_ = false;
   bool render_open_ = false;
   bool committed_ = false;
+  std::size_t pass_clear_count_ = 0;
+  std::size_t pass_load_count_ = 0;
+  std::size_t pass_depth_clear_count_ = 0;
+  bool clear_color_flag_ = true;
+  bool clear_depth_flag_ = true;
   GLuint draws_ = 0;
   GLenum last_mode_ = 0;
   void* layer_ = nullptr;
@@ -535,12 +603,16 @@ class MockMetalBridge : public MetalBridge {
   std::map<GLuint, SamplerDetail> frag_sampler_detail_;
   std::map<GLuint, std::pair<float, float>> sampler_lod_;  // min/max clamp.
   std::vector<GLuint> sampler_slots_;  // MSL slot -> GL unit.
+  std::vector<GLuint> vertex_sampler_slots_;  // MSL VS slot -> GL unit.
   GLsizei mrt_count_ = 1;
   std::map<GLuint, std::vector<std::uint8_t>> ubo_bytes_;
   CullConfig cull_cfg_;
   ViewportConfig viewport_cfg_;
   DepthConfig depth_cfg_;
   StencilConfig stencil_cfg_;
+  GLfloat clear_color_[4] = {0.f, 0.f, 0.f, 1.f};
+  GLsizei target_width_ = 0;
+  GLsizei target_height_ = 0;
   std::uint64_t frame_serial_ = 0;
   std::uint64_t completed_serial_ = 0;
   std::uint64_t swaps_ = 0;

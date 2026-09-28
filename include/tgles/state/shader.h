@@ -56,6 +56,14 @@ class ShaderManager {
   int ShaderVersion(GLuint shader) const;  // 100/300/310/320, -1 unknown.
   GLenum GetType(GLuint shader) const;
 
+  // Attachment refcount (spec 7.1): glDeleteShader only FLAGS a shader while
+  // it is still attached to a program; the object (and its name) stay usable
+  // for LinkProgram/GetShaderSource until the last program drops it.
+  // ProgramManager calls NotifyAttach/NotifyDetach around glAttachShader /
+  // glDetachShader / glDeleteProgram.
+  void NotifyAttach(GLuint shader);
+  void NotifyDetach(GLuint shader);
+
  private:
   struct Shader {
     bool alive = false;
@@ -65,6 +73,7 @@ class ShaderManager {
     bool compile_status = false;
     std::string info_log;
     bool marked_delete = false;
+    int attach_count = 0;  // Programs that still hold this shader.
   };
 
   static bool IsShaderType(GLenum type);

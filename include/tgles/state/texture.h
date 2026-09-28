@@ -6,6 +6,7 @@
 // buffer textures, parameters and mipmap generation.
 
 #include <array>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
@@ -119,6 +120,9 @@ inline constexpr GLint kMaxTextureBufferSizeValue = 131072;  // Min 65536.
 // (BackendObject.h: "1 means the offset is unconstrained").
 inline constexpr GLint kTextureBufferOffsetAlignmentValue = 1;
 
+// Process-wide monotonic counter backing TextureLevel::revision.
+std::uint64_t NextTextureContentRevision();
+
 struct TextureLevel {
   bool defined = false;
   GLenum internalformat = 0;
@@ -127,6 +131,19 @@ struct TextureLevel {
   GLsizei depth = 0;
   GLsizei samples = 0;
   std::vector<std::uint8_t> pixels;
+  // Content revision: fresh monotonic value at construction, re-armed on
+  // every in-place pixel write. The facade's per-unit upload cache keys on
+  // (address, revision) so the bridge only re-creates its MTLTexture when
+  // bytes actually changed (per-draw re-upload was the fps killer). Views
+  // share the original's TextureLevel objects, so a write through either
+  // name changes the revision both names read.
+  std::uint64_t revision = NextTextureContentRevision();
+  // Transfer format/type of the last TexImage2D/TexSubImage2D (0 = never
+  // uploaded through those entry points). Diagnostics only: the log's
+  // "t0=… alpha" readout needs to say whether the app itself uploaded a
+  // transparent corner or TGLES produced one.
+  GLenum upload_format = 0;
+  GLenum upload_type = 0;
 };
 
 struct TextureParams {
@@ -279,6 +296,12 @@ class TextureManager {
   bool IsImmutable(GLuint texture) const;
   TextureLevel LevelState(GLuint texture, GLenum face_target,
                           GLint level) const;
+  // Pointer form of LevelState for the draw-time upload walk: no pixel copy.
+  // Nullptr when the level is missing (same cases LevelState returns an
+  // undefined level for); otherwise points at the live shared level — a view
+  // resolves through its own images map to the same underlying TextureLevel.
+  const TextureLevel* LevelStateRef(GLuint texture, GLenum face_target,
+                                    GLint level) const;
   GLuint BoundTexture(GLenum target) const;
   GLuint ActiveUnit() const;
   // Sampling helper (ES 3.2 §8): texture bound to `unit` for `target`
@@ -293,6 +316,12 @@ class TextureManager {
 
   // Shared with framebuffer.cpp (public so the FBO module can classify).
   static bool IsColorRenderableSized(GLenum internalformat);
+
+  // Memory accounting for the device log: bytes of CPU-side pixel storage
+  // currently held (unique TextureLevel storage, views counted once). The
+  // [MEM] line needs this to say whether the translator's texture cache —
+  // not the JVM — is what pushes a 3 GB device into Jetsam.
+  std::size_t TotalPixelBytes() const;
 
  private:
   struct Texture {

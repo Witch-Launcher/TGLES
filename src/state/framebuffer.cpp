@@ -1,5 +1,7 @@
 #include "tgles/state/framebuffer.h"
 
+#include "tgles/base/debug_log.h"
+
 namespace tgles {
 
 // --- Renderbuffers ---
@@ -600,9 +602,19 @@ void FramebufferManager::ReadBuffer(GLenum src) {
   }
 }
 
-void FramebufferManager::BlitFramebuffer(GLint, GLint, GLint, GLint, GLint,
-                                         GLint, GLint, GLint, GLbitfield mask,
-                                         GLenum filter) {
+void FramebufferManager::BlitFramebuffer(GLint src_x0, GLint src_y0,
+                                         GLint src_x1, GLint src_y1,
+                                         GLint dst_x0, GLint dst_y0,
+                                         GLint dst_x1, GLint dst_y1,
+                                         GLbitfield mask, GLenum filter) {
+  (void)src_x0;
+  (void)src_y0;
+  (void)src_x1;
+  (void)src_y1;
+  (void)dst_x0;
+  (void)dst_y0;
+  (void)dst_x1;
+  (void)dst_y1;
   constexpr GLbitfield kAllBits =
       kGlColorBufferBit | kGlDepthBufferBit | kGlStencilBufferBit;
   if ((mask & ~kAllBits) != 0) {
@@ -618,7 +630,24 @@ void FramebufferManager::BlitFramebuffer(GLint, GLint, GLint, GLint, GLint,
     errors_.Record(kGlInvalidOperation);  // LINEAR only for color.
     return;
   }
-  // Pixel movement itself is backend business (step 9 blit encoder).
+  // Pixel movement itself is backend business (step 9 blit encoder) — the
+  // bridge target already holds every app draw. But a COLOR blit INTO the
+  // window (bound draw FBO 0) is how an app says "this FBO is the screen":
+  // remember it so its glClear marks a window clear (MC clears its main
+  // target every frame, then blits it to 0; the GUI target's clear must not
+  // wipe the window).
+  if (bound_draw_ == 0 && (mask & kGlColorBufferBit) != 0 &&
+      bound_read_ != 0) {
+    window_source_ = bound_read_;
+  }
+  static int s_blit_diag = 0;
+  const int n = ++s_blit_diag;
+  if (n <= 16) {
+    TglDebugf(
+        "diag blit#%d read=%u draw=%u mask=0x%x wsrc=%u (stuck: window "
+        "source)",
+        n, bound_read_, bound_draw_, mask, window_source_);
+  }
 }
 
 void FramebufferManager::InvalidateFramebuffer(GLenum target,
@@ -705,11 +734,18 @@ void FramebufferManager::Clear(GLbitfield mask,
     return;
   }
   if (mask == 0) return;  // Clearing nothing is a no-op (spec 17.3).
+  // Capture the color now: the facade must clear the bridge target with
+  // THIS clear's color, not with whatever glClearColor happens to be by the
+  // time the next draw submits (other FBOs get cleared in between).
+  for (int i = 0; i < 4; ++i) window_clear_color_[i] = clear_color[i];
   if (bound_draw_ == 0) {
-    // Window-system framebuffer: the CPU model knows no window size, so it
-    // cannot fill anything. Real clears happen in the bridge render pass;
-    // failing closed here keeps headless runs honest.
-    errors_.Record(kGlInvalidOperation);
+    // Window-system framebuffer: the CPU model has no window pixels to
+    // fill. Do NOT fail closed — the facade marks a pending window clear
+    // and the next bridge pass clears on device with the current
+    // glClearColor/glClearDepth/glClearStencil state (spec 17.3: the clear
+    // is ordered before subsequent draws; Metal loadActionClear at pass
+    // start is the device equivalent for the first pass of the frame).
+    window_clear_pending_ = true;
     return;
   }
   if (CheckFramebufferStatus(kGlDrawFramebuffer) != kGlFramebufferComplete) {
@@ -734,6 +770,15 @@ void FramebufferManager::Clear(GLbitfield mask,
         !textures_->FillLevel(att.name, att.textarget, att.level, rgba)) {
       errors_.Record(kGlInvalidOperation);
       return;
+    }
+    // The bound FBO is the one presented to the window (learned from a
+    // blit into FBO 0): its clear IS the window clear, so the facade must
+    // clear the bridge target with this color at the next pass start.
+    // Clears of any other FBO stay in the CPU model only — they must not
+    // decide what the window shows (spec 17.3: clearing an offscreen target
+    // never touches the default framebuffer).
+    if (bound_draw_ == window_source_ && window_source_ != 0) {
+      window_clear_pending_ = true;
     }
   }
   if ((mask & kGlDepthBufferBit) != 0) {
@@ -903,6 +948,32 @@ Attachment FramebufferManager::AttachmentState(GLuint framebuffer,
 GLuint FramebufferManager::BoundFramebuffer(GLenum target) const {
   if (target == kGlReadFramebuffer) return bound_read_;
   return bound_draw_;
+}
+
+void FramebufferManager::SetDefaultFramebufferSize(GLsizei width,
+                                                   GLsizei height) {
+  if (width <= 0 || height <= 0) return;
+  default_fb_width_ = width;
+  default_fb_height_ = height;
+}
+
+void FramebufferManager::DefaultFramebufferSize(GLsizei* width,
+                                                GLsizei* height) const {
+  if (width != nullptr) *width = default_fb_width_;
+  if (height != nullptr) *height = default_fb_height_;
+}
+
+bool FramebufferManager::ConsumeWindowClear() {
+  const bool was = window_clear_pending_;
+  window_clear_pending_ = false;
+  return was;
+}
+
+void FramebufferManager::MarkWindowClear() { window_clear_pending_ = true; }
+
+void FramebufferManager::GetWindowClearColor(GLfloat out[4]) const {
+  if (out == nullptr) return;
+  for (int i = 0; i < 4; ++i) out[i] = window_clear_color_[i];
 }
 
 std::vector<GLenum> FramebufferManager::DrawBufferList(

@@ -162,6 +162,8 @@ TEST(RasterExecReal, ViewportClipsToLeftHalf) {
   if (!bridge->Initialize("Apple3")) return;
   tgles::GlesContext ctx = tgles::GlesContext::Create(false);
   BuildRedSceneRast(ctx);
+  // Opaque black clear so clipped pixels keep alpha=255 (GL default is 0).
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.raster().Viewport(0, 0, 8, 16);
   EXPECT_TRUE(ctx.RenderFrame(*bridge, tgles::kGlTriangles, 0, 3));
   EXPECT_EQ(ctx.GetError(), tgles::kGlNoError);
@@ -184,6 +186,7 @@ TEST(RasterExecReal, ViewportTopHalfIsUp) {
   if (!bridge->Initialize("Apple3")) return;
   tgles::GlesContext ctx = tgles::GlesContext::Create(false);
   BuildRedSceneRast(ctx);
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.raster().Viewport(0, 8, 16, 8);
   EXPECT_TRUE(ctx.RenderFrame(*bridge, tgles::kGlTriangles, 0, 3));
   EXPECT_EQ(ctx.GetError(), tgles::kGlNoError);
@@ -205,6 +208,7 @@ TEST(RasterExecReal, ScissorClipsToLeftHalf) {
   if (!bridge->Initialize("Apple3")) return;
   tgles::GlesContext ctx = tgles::GlesContext::Create(false);
   BuildRedSceneRast(ctx);
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.foundation().Enable(tgles::kGlScissorTest);
   ctx.raster().Scissor(0, 0, 8, 16);
   EXPECT_TRUE(ctx.RenderFrame(*bridge, tgles::kGlTriangles, 0, 3));
@@ -225,6 +229,7 @@ TEST(RasterExecReal, ScissorTopHalfIsUp) {
   if (!bridge->Initialize("Apple3")) return;
   tgles::GlesContext ctx = tgles::GlesContext::Create(false);
   BuildRedSceneRast(ctx);
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.foundation().Enable(tgles::kGlScissorTest);
   ctx.raster().Scissor(0, 8, 16, 8);
   EXPECT_TRUE(ctx.RenderFrame(*bridge, tgles::kGlTriangles, 0, 3));

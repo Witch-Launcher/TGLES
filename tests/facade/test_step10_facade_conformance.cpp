@@ -37,6 +37,33 @@ TEST(Step10, ElementArrayBindingSyncsVao) {
   EXPECT_EQ(ctx.GetError(), tgles::kGlNoError);
 }
 
+TEST(Step10, StaleBufferErrorDoesNotBlockEabVaoSync) {
+  // Minecraft 26.1.2: a prior BufferData failure left BufferManager pending;
+  // BindBuffer(EAB) used to skip SetElementArrayBuffer when HasPending(),
+  // so DrawElements fail-closed forever (no ELEMENT_ARRAY_BUFFER).
+  tgles::GlesContext ctx = tgles::GlesContext::Create(false);
+  ctx.buffers().BindBuffer(tgles::kGlArrayBuffer, 0);
+  ctx.buffers().BufferData(tgles::kGlArrayBuffer, 16, nullptr,
+                           tgles::kGlStaticDraw);  // INVALID_OPERATION on 0.
+  EXPECT_TRUE(ctx.buffers().HasPending());
+  while (ctx.buffers().HasPending()) (void)ctx.buffers().GetError();
+  // Re-create pending without clearing (simulate app not polling glGetError).
+  ctx.buffers().BindBuffer(tgles::kGlArrayBuffer, 0);
+  ctx.buffers().BufferData(tgles::kGlArrayBuffer, 16, nullptr,
+                           tgles::kGlStaticDraw);
+  EXPECT_TRUE(ctx.buffers().HasPending());
+  tgles::GLuint eab = 0;
+  ctx.buffers().GenBuffers(1, &eab);
+  ctx.BindBuffer(tgles::kGlElementArrayBuffer, eab);
+  // EAB is always a valid target: VAO mirror must land even with pending.
+  EXPECT_EQ(ctx.vertex_arrays().ElementArrayBuffer(), eab);
+  ctx.SyncElementState();
+  tgles::GLuint eab2 = 0;
+  ctx.buffers().GenBuffers(1, &eab2);
+  ctx.BindBuffer(tgles::kGlElementArrayBuffer, eab2);
+  EXPECT_EQ(ctx.vertex_arrays().ElementArrayBuffer(), eab2);
+}
+
 TEST(Step10, IndirectDrawSeesBufferBinding) {
   tgles::GlesContext ctx = tgles::GlesContext::Create(false);
   ctx.DrawElementsIndirect(tgles::kGlTriangles,

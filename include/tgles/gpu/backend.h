@@ -75,11 +75,15 @@ struct PsoKey {
   // `program_id` keep per-program MSL from aliasing each other.
   // `slot2` is the attrib-2 component count (0 = absent, else 2/3/4):
   // vertex stride is 32 + 4*slot2, so cube directions (vec3) and uvs share
-  // one layout rule. `mrt_count` (1..8) declares extra color attachments.
+  // one layout rule. `slot3` is the attrib-3 (UV2/lightmap) component count
+  // (0 = absent, else 2/3/4): stride becomes 32 + 4*slot2 + 4*slot3 and
+  // attribute 3 sits at offset 32+4*slot2. `mrt_count` (1..8) declares extra
+  // color attachments.
   bool textured = false;
   bool translated = false;
   std::uint32_t program_id = 0;
   std::uint8_t slot2 = 0;
+  std::uint8_t slot3 = 0;
   std::uint8_t mrt_count = 1;
 
    bool operator==(const PsoKey& other) const;

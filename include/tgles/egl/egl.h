@@ -162,7 +162,14 @@ class EglState {
                                   const EGLint* attribs);
   EGLBoolean DestroySurface(EGLDisplay dpy, EGLSurface surface);
   EGLBoolean QuerySurface(EGLDisplay dpy, EGLSurface surface,
-                          EGLint attribute, EGLint* value);
+                           EGLint attribute, EGLint* value);
+  // Host present path: window surfaces carry no size at creation time (EGL
+  // takes no WxH for windows). The in-dylib Metal bridge learns the real
+  // drawable size from tglHostAttachMetalLayer/tglHostResizeMetalLayer, so
+  // mirror it here. Keeps eglQuerySurface(WIDTH/HEIGHT) truthful instead of
+  // 0x0, which hosts (e.g. launcher readback probes) otherwise sample as
+  // (0,0)/(-1,-1) and log bogus INVALID_FRAMEBUFFER_OPERATION.
+  void SetWindowSurfaceSize(EGLint width, EGLint height);
 
   EGLBoolean MakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
                          EGLContext ctx);
@@ -286,6 +293,11 @@ class EglState {
   EGLSurface current_draw_ = kEglNoSurface;
   EGLSurface current_read_ = kEglNoSurface;
   EGLint swap_interval_ = 1;
+  // Last drawable size published by SetWindowSurfaceSize (Metal attach/resize).
+  // Applied to window surfaces created AFTER that call so hosts that attach
+  // the layer before eglCreateWindowSurface never see QuerySurface 0x0.
+  EGLint last_window_width_ = 0;
+  EGLint last_window_height_ = 0;
   std::string strings_;
 };
 

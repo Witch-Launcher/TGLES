@@ -13,6 +13,7 @@
 #include <string>
 
 #include "tgles/base/gl_types.h"
+#include "tgles/base/debug_log.h"
 #include "tgles/facade/gles.h"
 #include "tgles/host/host_runtime.h"
 
@@ -120,6 +121,25 @@ GLboolean glIsEnabled(GLenum cap) {
 
 void glClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
   if (!RequireContext()) return;
+  // Round-4: attribute the background color to its requester. MC cleared its
+  // window-sized target RED once and then TRANSPARENT on every later frame;
+  // whether that transparency is MC's own request or something upstream
+  // (MobileGL) mangling the value decides how the window must be cleared.
+  // Every *change* logs (bounded), so a long session cannot flood the ring.
+  static GLfloat prev[4] = {-1, -1, -1, -1};
+  static int logged = 0;
+  if (prev[0] != red || prev[1] != green || prev[2] != blue ||
+      prev[3] != alpha) {
+    prev[0] = red;
+    prev[1] = green;
+    prev[2] = blue;
+    prev[3] = alpha;
+    if (logged < 32) {
+      ++logged;
+      tgles::TglDebugf("diag clearColor#%d rgba=%.3f,%.3f,%.3f,%.3f t=%lld",
+                       logged, red, green, blue, alpha, tgles::TglNowMs());
+    }
+  }
   Gl().raster().ClearColor(red, green, blue, alpha);
 }
 
@@ -1733,8 +1753,11 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                      GLsizei width, GLsizei height, GLenum format, GLenum type,
                      const void* pixels) {
   if (!RequireContext()) return;
+  const void* src = nullptr;
+  if (!Gl().ResolveTexelSource(pixels, width, height, 1, format, type, &src))
+    return;
   Gl().textures().TexSubImage2D(target, level, xoffset, yoffset, width,
-                                height, format, type, pixels);
+                                height, format, type, src);
 }
 
 void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
@@ -1742,16 +1765,24 @@ void glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                      GLsizei depth, GLenum format, GLenum type,
                      const void* pixels) {
   if (!RequireContext()) return;
+  const void* src = nullptr;
+  if (!Gl().ResolveTexelSource(pixels, width, height, depth, format, type,
+                               &src))
+    return;
   Gl().textures().TexSubImage3D(target, level, xoffset, yoffset, zoffset,
-                                width, height, depth, format, type, pixels);
+                                width, height, depth, format, type, src);
 }
 
 void glTexImage3D(GLenum target, GLint level, GLint internalformat,
                   GLsizei width, GLsizei height, GLsizei depth, GLint border,
                   GLenum format, GLenum type, const void* pixels) {
   if (!RequireContext()) return;
+  const void* src = nullptr;
+  if (!Gl().ResolveTexelSource(pixels, width, height, depth, format, type,
+                               &src))
+    return;
   Gl().textures().TexImage3D(target, level, internalformat, width, height,
-                             depth, border, format, type, pixels);
+                             depth, border, format, type, src);
 }
 
 void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,

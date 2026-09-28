@@ -31,7 +31,14 @@ int ShaderManager::ParseVersion(const std::string& source) {
   std::smatch m;
   if (!std::regex_search(source, m, kVersion)) return 100;  // Default: 1.00.
   const int v = std::stoi(m[1].str());
-  return (v == 100 || v == 300 || v == 310 || v == 320) ? v : -1;
+  // ES: 100/300/310/320. Desktop GLSL that apps (MC 26) actually ship:
+  // 150 (3.2), 330 (3.3), 400..450. Profile keyword (`es`/`core`/`compat`)
+  // is ignored — only the version number must be known.
+  return (v == 100 || v == 150 || v == 300 || v == 310 || v == 320 ||
+          v == 330 || v == 400 || v == 410 || v == 420 || v == 430 ||
+          v == 450)
+             ? v
+             : -1;
 }
 
 GLuint ShaderManager::CreateShader(GLenum type) {
@@ -51,8 +58,31 @@ void ShaderManager::DeleteShader(GLuint shader) {
   if (shader == 0) return;  // Unused names are silently ignored.
   auto it = shaders_.find(shader);
   if (it == shaders_.end() || !it->second.alive) return;
-  it->second.alive = false;
   it->second.marked_delete = true;
+  // Spec 7.1: a shader still attached to a program is only FLAGGED; the
+  // object stays alive (and its name valid for that program's LinkProgram)
+  // until the last program drops it. Freeing here is what broke MobileGL's
+  // attach→delete→link sequence and left every MC shader program unlinked.
+  if (it->second.attach_count == 0) {
+    it->second.alive = false;
+  }
+}
+
+void ShaderManager::NotifyAttach(GLuint shader) {
+  auto it = shaders_.find(shader);
+  if (it == shaders_.end() || !it->second.alive) return;
+  ++it->second.attach_count;
+}
+
+void ShaderManager::NotifyDetach(GLuint shader) {
+  auto it = shaders_.find(shader);
+  if (it == shaders_.end()) return;
+  if (it->second.attach_count > 0) --it->second.attach_count;
+  // Last program dropped a shader that was glDeleteShader-flagged while
+  // attached: free it now (spec 7.1 delete-while-attached completion).
+  if (it->second.attach_count == 0 && it->second.marked_delete) {
+    it->second.alive = false;
+  }
 }
 
 GLboolean ShaderManager::IsShader(GLuint shader) {
@@ -101,7 +131,8 @@ void ShaderManager::CompileShader(GLuint shader) {
   const int version = ParseVersion(s.source);
   if (version < 0) {
     s.compile_status = false;
-    s.info_log = "error: unsupported #version (want 100/300/310/320 es)";
+    s.info_log =
+        "error: unsupported #version (want 100/150/300/310/320/330/400-450)";
     return;
   }
   if (s.source.find("void main") == std::string::npos) {

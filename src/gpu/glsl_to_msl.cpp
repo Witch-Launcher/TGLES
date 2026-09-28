@@ -11,8 +11,12 @@
 
 #include "tgles/gpu/glsl_to_msl.h"
 
+#include <cctype>
+#include <map>
 #include <regex>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace tgles {
 namespace glsl {
@@ -61,7 +65,10 @@ std::string StripLineDirectives(const std::string& s) {
   while (std::getline(in, line)) {
     std::string t = line;
     t.erase(0, t.find_first_not_of(" \t\r"));
-    if (t.rfind("#version", 0) == 0) continue;
+    // Drop every preprocessor line: #version, #moj_import (MC expands these
+    // before glShaderSource — if any survive, they only confuse decl parse),
+    // #extension/#define/#ifdef — and standalone precision declarations.
+    if (!t.empty() && t[0] == '#') continue;
     static const std::regex kPrecision(R"(^\s*precision\s+\w+\s+\w+\s*;)");
     if (std::regex_search(line, kPrecision)) continue;
     out += line + "\n";
@@ -116,6 +123,100 @@ std::vector<Decl> FindDecls(const std::string& src, const std::string& kind) {
     if (std::regex_search(inside, vm, idx_re))
       d.index = std::stoi(vm[1].str());
     out.push_back(d);
+  }
+  return out;
+}
+
+// Global-scope variable declarations before `void main` (brace-depth 0 only).
+// MC animate_sprite.vsh keeps `const vec2 positions[] = vec2[](...)` outside
+// main; SPIRV-Cross renames it to `_60`. MainBody only takes inside main, so
+// those decls must be re-emitted or `_60[index]` is undeclared in MSL.
+std::string ExtractGlobalConstDecls(const std::string& src) {
+  static const std::regex kMain(R"(void\s+main\s*\()");
+  std::smatch mm;
+  if (!std::regex_search(src, mm, kMain)) return {};
+  const std::string prefix =
+      src.substr(0, static_cast<std::size_t>(mm.position()));
+  std::vector<int> depth(prefix.size() + 1, 0);
+  int d = 0;
+  for (std::size_t i = 0; i < prefix.size(); ++i) {
+    if (prefix[i] == '{') ++d;
+    if (prefix[i] == '}') --d;
+    depth[i + 1] = d;
+  }
+  // Require a statement boundary before the type so `in vec2 foo;` / uniform
+  // block members (depth>0) never match; optional `const` covers SPIRV-Cross
+  // dropping the keyword.
+  static const std::regex kVar(
+      R"((?:^|[;{}])\s*((?:const\s+)?(?:lowp\s+|mediump\s+|highp\s+)?(?:float|int|uint|bool|vec[234]|ivec[234]|uvec[234]|bvec[234]|mat[234](?:x[234])?)\s+[A-Za-z_]\w*\s*(?:\[[^\]]*\])?\s*(?:=[^;]*)?;))");
+  std::string out;
+  for (std::sregex_iterator it(prefix.begin(), prefix.end(), kVar), end;
+       it != end; ++it) {
+    const auto pos = static_cast<std::size_t>((*it).position(1));
+    if (depth[pos] != 0) continue;
+    out += (*it)[1].str();
+    if (out.empty() || out.back() != '\n') out += '\n';
+  }
+  return out;
+}
+
+// MSL has no `float2[]( ... )` array constructor; GLSL / SPIRV-Cross emit
+// `vec2[](a,b)` / `vec2[6](a,b)` which RewriteConstructors turns into
+// `float2[](...)`. Map the whole ctor to a brace initializer.
+std::string RewriteArrayCtors(std::string s) {
+  static const std::regex kCtor(
+      R"((?:float2|float3|float4|float|int|uint|bool|int2|int3|int4|uint2|uint3|uint4)\s*\[\s*\d*\s*\]\s*\()");
+  for (;;) {
+    std::smatch m;
+    if (!std::regex_search(s, m, kCtor)) break;
+    const auto abs = static_cast<std::size_t>(m.position());
+    const auto open = abs + m.length() - 1;
+    int depth = 0;
+    std::size_t close = std::string::npos;
+    for (std::size_t i = open; i < s.size(); ++i) {
+      if (s[i] == '(') ++depth;
+      if (s[i] == ')') {
+        if (--depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close == std::string::npos) break;
+    s = s.substr(0, abs) + "{" +
+        s.substr(open + 1, close - open - 1) + "}" + s.substr(close + 1);
+  }
+  return s;
+}
+
+// Free function definitions outside `void main` (fog.glsl / light.glsl after
+// moj_import / SPIRV-Cross). MainBody only takes inside main; dropping these
+// leaves fog_spherical_distance etc. undeclared once those programs draw.
+// Returns concatenated source of every non-main top-level function.
+std::string ExtractGlobalFunctions(const std::string& src) {
+  static const std::regex kFn(
+      R"(\b(?:void|float|int|uint|bool|vec[234]|ivec[234]|uvec[234]|bvec[234]|mat[234](?:x[234])?)\s+([A-Za-z_]\w*)\s*\([^;{]*\)\s*\{)");
+  std::string out;
+  for (std::sregex_iterator it(src.begin(), src.end(), kFn), end; it != end;
+       ++it) {
+    const std::string name = (*it)[1].str();
+    if (name == "main") continue;
+    const auto brace = static_cast<std::size_t>((*it).position() + (*it).length() - 1);
+    int depth = 0;
+    std::size_t close = std::string::npos;
+    for (std::size_t i = brace; i < src.size(); ++i) {
+      if (src[i] == '{') ++depth;
+      if (src[i] == '}') {
+        if (--depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close == std::string::npos) continue;
+    out += src.substr(static_cast<std::size_t>((*it).position()),
+                      close - static_cast<std::size_t>((*it).position()) + 1);
+    out += "\n";
   }
   return out;
 }
@@ -180,6 +281,30 @@ bool UniformLayoutOf(const std::string& glsl, UniformLayout* out) {
     *out = {"bool", 1, 4};
     return true;
   }
+  if (glsl == "ivec2") {
+    *out = {"int2", 2, 8};
+    return true;
+  }
+  if (glsl == "ivec3") {
+    *out = {"int3", 3, 12};
+    return true;
+  }
+  if (glsl == "ivec4") {
+    *out = {"int4", 4, 16};
+    return true;
+  }
+  if (glsl == "uvec2") {
+    *out = {"uint2", 2, 8};
+    return true;
+  }
+  if (glsl == "uvec3") {
+    *out = {"uint3", 3, 12};
+    return true;
+  }
+  if (glsl == "uvec4") {
+    *out = {"uint4", 4, 16};
+    return true;
+  }
   return false;
 }
 
@@ -219,14 +344,131 @@ std::string SuffixFloatLiterals(std::string s) {
   return s;
 }
 
-// texture(sampler, args...) with balanced parens -> sampler sample call.
-// kind: 0=2D (uv), 1=cube (dir), 2=3D (coord), 3=2D-array (vec3: xy + layer).
+// texture(sampler, args...) / textureLod(sampler, coord, lod) with balanced
+// parens -> MSL sample() call. kind: 0=2D (uv), 1=cube (dir), 2=3D (coord),
+// 3=2D-array (vec3: xy + layer).
+// MSL mapping (Metal Shading Language 3.x):
+//   texture(s, P)           -> s_tex.sample(s_smp, P)
+//   texture(s, P, bias)     -> s_tex.sample(s_smp, P, bias(b))
+//   textureLod(s, P, lod)   -> s_tex.sample(s_smp, P, level(lod))
+// For array textures P is vec3 (xy + layer): the layer component is split
+// into the separate uint argument Metal's array sample() expects.
+
+// SPIRV-Cross lowers clamp() to a NaN-safe form using mix(x, y, isnan(...)).
+// GLSL mix accepts a bvec third arg (component select); Metal's mix requires
+// a float weight — bool3 fails with "no matching function for call to mix".
+// Metal spelling for the bvec form is select(a, b, cond) (true -> b).
+std::string RewriteBoolMixToSelect(std::string s) {
+  auto is_bool_arg = [](const std::string& a) {
+    // Trim.
+    std::size_t b = a.find_first_not_of(" \t\n\r");
+    if (b == std::string::npos) return false;
+    std::size_t e = a.find_last_not_of(" \t\n\r");
+    const std::string t = a.substr(b, e - b + 1);
+    if (t == "true" || t == "false") return true;
+    // Boolean builtins (post-relational rename + SPIRV-Cross NaN clamp).
+    static const char* kBoolFns[] = {
+        "isnan(",   "isinf(",     "isfinite(",  "isunordered(",
+        "isless(",  "isgreater(", "isequal(",   "isnotequal(",
+        "islessequal(", "isgreaterequal(", "lessThan(", "greaterThan(",
+        "lessThanEqual(", "greaterThanEqual(", "equal(", "notEqual(",
+        "any(",     "all(",
+    };
+    for (const char* fn : kBoolFns) {
+      if (t.find(fn) != std::string::npos) return true;
+    }
+    // Leading ! on the whole expression.
+    if (!t.empty() && t[0] == '!') return true;
+    return false;
+  };
+  // Walk every top-level mix( ... ) and rewrite when arg3 is boolean.
+  std::string out;
+  std::size_t pos = 0;
+  while (pos < s.size()) {
+    const auto at = s.find("mix(", pos);
+    if (at == std::string::npos) {
+      out += s.substr(pos);
+      break;
+    }
+    // Word boundary before "mix".
+    if (at > 0 && (std::isalnum(static_cast<unsigned char>(s[at - 1])) ||
+                   s[at - 1] == '_' || s[at - 1] == '.')) {
+      out += s.substr(pos, at + 4 - pos);
+      pos = at + 4;
+      continue;
+    }
+    out += s.substr(pos, at - pos);
+    const std::size_t open = at + 3;  // points at '('
+    int depth = 0;
+    std::size_t close = std::string::npos;
+    for (std::size_t i = open; i < s.size(); ++i) {
+      if (s[i] == '(') ++depth;
+      if (s[i] == ')') {
+        if (--depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close == std::string::npos) {
+      out += s.substr(at);
+      break;
+    }
+    // Rewrite nested mix( inside args first (SPIRV-Cross clamp is nested).
+    const std::string args = RewriteBoolMixToSelect(
+        s.substr(open + 1, close - open - 1));
+    // Split top-level commas.
+    std::vector<std::string> parts;
+    {
+      std::string cur;
+      int d = 0;
+      for (char c : args) {
+        if (c == '(') ++d;
+        if (c == ')') --d;
+        if (c == ',' && d == 0) {
+          parts.push_back(cur);
+          cur.clear();
+        } else {
+          cur.push_back(c);
+        }
+      }
+      parts.push_back(cur);
+    }
+    const bool use_select = parts.size() == 3 && is_bool_arg(parts[2]);
+    out += use_select ? "select" : "mix";
+    out += "(" + args + ")";
+    pos = close + 1;
+  }
+  return out;
+}
+
 bool RewriteTextureCalls(std::string& body, const std::string& sampler,
                          int kind, std::string* error) {
   std::string out;
   std::size_t pos = 0;
   bool any = false;
-  const std::regex kCall("\\btexture\\s*\\(\\s*" + sampler + "\\s*,");
+  // Match texture( or textureLod( for this sampler (word-boundary before so
+  // textureLodOffset etc. never match; Lod captured for the rewrite form).
+  const std::regex kCall(
+      "\\btexture(Lod|Grad)?\\s*\\(\\s*" + sampler + "\\s*,");
+  // Split top-level commas into args (paren depth only; no nesting of []).
+  auto split_args = [](const std::string& s) {
+    std::vector<std::string> parts;
+    std::string cur;
+    int depth = 0;
+    for (char c : s) {
+      if (c == '(') ++depth;
+      if (c == ')') --depth;
+      if (c == ',' && depth == 0) {
+        parts.push_back(cur);
+        cur.clear();
+      } else {
+        cur.push_back(c);
+      }
+    }
+    parts.push_back(cur);
+    return parts;
+  };
   while (true) {
     std::smatch m;
     std::string rest = body.substr(pos);
@@ -235,11 +477,14 @@ bool RewriteTextureCalls(std::string& body, const std::string& sampler,
       break;
     }
     any = true;
+    const std::string tex_kind = m[1].matched ? m[1].str() : std::string();
+    const bool is_lod = tex_kind == "Lod";
+    const bool is_grad = tex_kind == "Grad";
     out += rest.substr(0, static_cast<std::size_t>(m.position()));
     std::size_t arg_start =
         pos + static_cast<std::size_t>(m.position()) +
         static_cast<std::size_t>(m.length());
-    // Scan to the matching close paren of texture(.
+    // Scan to the matching close paren of texture(/textureLod(.
     int depth = 1;
     std::size_t i = arg_start;
     for (; i < body.size() && depth > 0; ++i) {
@@ -250,28 +495,62 @@ bool RewriteTextureCalls(std::string& body, const std::string& sampler,
       *error = "unbalanced texture() call for sampler " + sampler;
       return false;
     }
-    std::string args = body.substr(arg_start, i - arg_start - 1);
-    // Strip an optional bias argument (v1: bias unsupported, must be absent).
-    // A second top-level comma means bias/lod form -> fail closed.
-    int d2 = 0;
-    bool has_bias = false;
-    for (char c : args) {
-      if (c == '(') ++d2;
-      if (c == ')') --d2;
-      if (c == ',' && d2 == 0) {
-        has_bias = true;
-        break;
+    const std::string args = body.substr(arg_start, i - arg_start - 1);
+    const std::vector<std::string> parts = split_args(args);
+    if (is_lod) {
+      // textureLod(s, P, lod): exactly coord + lod.
+      if (parts.size() != 2) {
+        *error = "textureLod needs (sampler, coord, lod): " + sampler;
+        return false;
       }
-    }
-    if (has_bias) {
-      *error = "texture() with bias/lod not supported in v1: " + sampler;
-      return false;
-    }
-    if (kind == 3) {
-      out += sampler + "_tex.sample(" + sampler + "_smp, ((" + args +
-             ").xy), uint((" + args + ").z))";
+      const std::string& coord = parts[0];
+      const std::string& lod = parts[1];
+      if (kind == 3) {
+        out += sampler + "_tex.sample(" + sampler + "_smp, ((" + coord +
+               ").xy), uint((" + coord + ").z), level(" + lod + "))";
+      } else {
+        out += sampler + "_tex.sample(" + sampler + "_smp, (" + coord +
+               "), level(" + lod + "))";
+      }
+    } else if (is_grad) {
+      // textureGrad(s, P, ddx, ddy) -> s_tex.sample(s_smp, P, gradientN(...))
+      if (parts.size() != 3) {
+        *error = "textureGrad needs (sampler, coord, ddx, ddy): " + sampler;
+        return false;
+      }
+      const std::string grad =
+          (kind == 1) ? "gradientcube("
+                      : (kind == 2) ? "gradient3d(" : "gradient2d(";
+      const std::string gargs = parts[1] + ", " + parts[2] + ")";
+      if (kind == 3) {
+        out += sampler + "_tex.sample(" + sampler + "_smp, ((" + parts[0] +
+               ").xy), uint((" + parts[0] + ").z), " + grad + gargs + ")";
+      } else {
+        out += sampler + "_tex.sample(" + sampler + "_smp, (" + parts[0] +
+               "), " + grad + gargs + ")";
+      }
+    } else if (parts.size() == 1) {
+      // texture(s, P)
+      if (kind == 3) {
+        out += sampler + "_tex.sample(" + sampler + "_smp, ((" + parts[0] +
+               ").xy), uint((" + parts[0] + ").z))";
+      } else {
+        out += sampler + "_tex.sample(" + sampler + "_smp, (" + parts[0] + "))";
+      }
+    } else if (parts.size() == 2) {
+      // texture(s, P, bias)
+      const std::string& coord = parts[0];
+      const std::string& bias = parts[1];
+      if (kind == 3) {
+        out += sampler + "_tex.sample(" + sampler + "_smp, ((" + coord +
+               ").xy), uint((" + coord + ").z), bias(" + bias + "))";
+      } else {
+        out += sampler + "_tex.sample(" + sampler + "_smp, (" + coord +
+               "), bias(" + bias + "))";
+      }
     } else {
-      out += sampler + "_tex.sample(" + sampler + "_smp, (" + args + "))";
+      *error = "unsupported texture() arity for sampler " + sampler;
+      return false;
     }
     pos = i;
   }
@@ -308,8 +587,6 @@ const char* const kDeny[] = {
     "groupMemoryBarrier",
     "texelFetch",
     "textureProj",
-    "textureLod",
-    "textureGrad",
     "textureOffset",
     "textureGather",
     "gl_PointCoord",
@@ -325,12 +602,14 @@ const char* const kDeny[] = {
 };
 
 struct ParsedUbo {
-  std::string name;  // MSL param name (instance or block name).
+  std::string name;        // MSL param name (instance or block name).
+  std::string block_name;  // GLSL block name (for reflection lookup).
   struct Member {
     std::string name;
     std::string msl;
     int floats = 0;
     int bytes = 0;
+    int offset = 0;
   };
   std::vector<Member> members;
   int total_bytes = 0;
@@ -341,7 +620,8 @@ struct ParsedUbo {
 bool LooksLegacyTrivial(const std::string& vs_src, const std::string& fs_src) {
   const std::string vs = StripComments(vs_src);
   const std::string fs = StripComments(fs_src);
-  for (const char* tok : {"sampler", "texture(", "dot(", "normalize("}) {
+  for (const char* tok :
+       {"sampler", "texture(", "textureLod(", "dot(", "normalize("}) {
     if (vs.find(tok) != std::string::npos) return false;
     if (fs.find(tok) != std::string::npos) return false;
   }
@@ -349,7 +629,8 @@ bool LooksLegacyTrivial(const std::string& vs_src, const std::string& fs_src) {
 }
 
 TranslatedProgram TranslateProgram(const std::string& vs_src,
-                                   const std::string& fs_src) {
+                                   const std::string& fs_src,
+                                   const std::map<std::string, int>* attrib_locs) {
   TranslatedProgram out;
   auto fail = [&](const std::string& why) {
     out.ok = false;
@@ -366,68 +647,89 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
     if (fs.find(tok) != std::string::npos)
       return fail(std::string("fragment uses unsupported construct: ") + tok);
   }
-  if (HasWord(fs, "return"))
+  // Only reject bare `return` inside void main — helpers (fog/light after
+  // moj_import) legitimately return values and must not trip this gate.
+  if (HasWord(MainBody(fs), "return"))
     return fail("fragment main with early return is not supported");
   if (HasWord(vs, "discard"))
     return fail("discard in vertex shader is not supported");
-  if (vs.find("uniform") != std::string::npos &&
-      std::regex_search(vs, std::regex(R"(\buniform\s+\w+\s*\{)")))
-    return fail("vertex uniform blocks not supported (fragment UBO only)");
-  // UBO blocks are fragment-only in v1 (vertex UBO would need buffer(3)).
 
-  // ---- Uniform blocks / UBO (fragment, std140 mat4/vec4/float/int/uint/ --
-  // ---- bool members; 16B-start total shared with the facade). -------------
+  // ---- Uniform blocks / UBO (both stages, deduped by instance name; ----
+  // ---- std140 mat4/vec4/vec3/vec2/float/int/uint/bool members; ----
+  // ---- 16B-start total shared with the facade; vs_main/fs_main both ----
+  // ---- get buffer(2+i) and the bridge binds ubo_bytes_ both stages). ----
   std::vector<ParsedUbo> ubos;
   {
     static const std::regex kBlock(
         R"(uniform\s+(\w+)\s*\{([^}]*)\}\s*(\w+)?\s*;)");
-    for (std::sregex_iterator it(fs.begin(), fs.end(), kBlock), end; it != end;
-         ++it) {
-      const std::string block_name = (*it)[1].str();
-      const std::string members_src = (*it)[2].str();
-      const std::string instance =
-          (*it)[3].matched ? (*it)[3].str() : block_name;
-      ParsedUbo b;
-      b.name = instance;
-      static const std::regex kMember(R"((\w+)\s+(\w+)\s*;)");
-      int offset = 0;
-      for (std::sregex_iterator mi(members_src.begin(), members_src.end(),
-                                   kMember),
-           mend;
-           mi != mend; ++mi) {
-        const std::string type = (*mi)[1].str();
-        const std::string name = (*mi)[2].str();
-        UniformLayout lay;
-        if (!UniformLayoutOf(type, &lay) || (lay.msl != "float4x4" &&
-                                             lay.msl != "float4" &&
-                                             lay.msl != "float" &&
-                                             lay.msl != "int" &&
-                                             lay.msl != "uint" &&
-                                             lay.msl != "bool"))
-          return fail("UBO member type not supported (mat4/vec4/float/int/"
-                      "uint/bool): " +
-                      type + " " + name);
-        // 16-byte-start rule shared with plain uniforms (over-allocates for
-        // consecutive scalars but keeps std140 offsets for the tested
-        // mat4/vec4/int/bool shapes; Metal pads bool(1B) so later offsets
-        // still match on little-endian).
-        offset = (offset + 15) / 16 * 16;
-        b.members.push_back({name, lay.msl, lay.floats, lay.bytes});
-        offset += lay.bytes;
+    auto parse_stage = [&](const std::string& src) -> std::string {
+      for (std::sregex_iterator it(src.begin(), src.end(), kBlock), end;
+           it != end; ++it) {
+        const std::string block_name = (*it)[1].str();
+        const std::string members_src = (*it)[2].str();
+        const std::string instance =
+            (*it)[3].matched ? (*it)[3].str() : block_name;
+        bool known = false;
+        for (const auto& existing : ubos)
+          if (existing.name == instance) known = true;
+        if (known) continue;
+        ParsedUbo b;
+        b.name = instance;
+        b.block_name = block_name;
+        static const std::regex kMember(R"((\w+)\s+(\w+)\s*;)");
+        int offset = 0;
+        for (std::sregex_iterator mi(members_src.begin(), members_src.end(),
+                                     kMember),
+             mend;
+             mi != mend; ++mi) {
+          const std::string type = (*mi)[1].str();
+          const std::string name = (*mi)[2].str();
+          UniformLayout lay;
+          if (!UniformLayoutOf(type, &lay) ||
+              (lay.msl != "float4x4" && lay.msl != "float4" &&
+               lay.msl != "float3" && lay.msl != "float2" &&
+               lay.msl != "float" && lay.msl != "int" && lay.msl != "int2" &&
+               lay.msl != "int3" && lay.msl != "int4" && lay.msl != "uint" &&
+               lay.msl != "uint2" && lay.msl != "uint3" &&
+               lay.msl != "uint4" && lay.msl != "bool"))
+            return "UBO member type not supported (mat4/vec4/vec3/vec2/"
+                   "float/int/uint/bool/ivec*/uvec*): " +
+                   type + " " + name;
+          // 16-byte-start rule shared with plain uniforms (over-allocates for
+          // consecutive scalars but keeps std140 offsets for the tested
+          // mat4/vec4/vec3 shapes; Metal pads bool(1B) so later offsets
+          // still match on little-endian).
+          offset = (offset + 15) / 16 * 16;
+          b.members.push_back({name, lay.msl, lay.floats, lay.bytes, offset});
+          offset += lay.bytes;
+        }
+        if (b.members.empty())
+          return "empty uniform block: " + block_name;
+        b.total_bytes = (offset + 15) / 16 * 16;
+        ubos.push_back(b);
       }
-      if (b.members.empty())
-        return fail("empty uniform block: " + block_name);
-      b.total_bytes = (offset + 15) / 16 * 16;
-      ubos.push_back(b);
+      return {};
+    };
+    // vs first (same packing order as plain uniforms), then fs dedupes.
+    {
+      const std::string err = parse_stage(vs);
+      if (!err.empty()) return fail(err);
+    }
+    {
+      const std::string err = parse_stage(fs);
+      if (!err.empty()) return fail(err);
     }
   }
 
-  // ---- Attributes (vertex `in`, slot convention 0/1[/2]). ----
+  // ---- Attributes (vertex `in`, slot convention 0/1[/2[/3]]). ----
   struct Attr {
     std::string name;
     std::string msl;
     int loc = -1;
     bool is_int = false;  // ivec/uvec/int/uint: float-converted (see docs).
+    // MSL cast type for reading the attr back (VertexIn stores floatN, so
+    // body reads must restore the GLSL int/uint type: `int2(in.UV2)`).
+    std::string int_cast;
   };
   std::vector<Attr> attrs;
   bool int_attribs = false;
@@ -455,30 +757,62 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
       } else {
         return fail("attribute type not supported: " + d.type + " " + d.name);
       }
-      const int loc = (d.location >= 0) ? d.location : next_loc;
-      if (loc < 0 || loc > 2)
-        return fail("attribute location must be 0..2: " + d.name);
+      const int explicit_loc =
+          (d.location >= 0)
+              ? d.location
+              : (attrib_locs != nullptr
+                     ? [&]() -> int {
+                         auto it = attrib_locs->find(d.name);
+                         return it == attrib_locs->end() ? -1 : it->second;
+                       }()
+                     : -1);
+      const int loc = (explicit_loc >= 0) ? explicit_loc : next_loc;
+      if (loc < 0 || loc > 3)
+        return fail("attribute location must be 0..3: " + d.name);
       // Location 2 carries uv/normal/dir (any float width; the facade
-      // interleaves slot2_comps*4 bytes and the descriptor matches).
-      if (loc != 2 && msl != "float4" && msl != "float3")
-        return fail("locations 0/1 must be vec4/vec3: " + d.name);
+      // interleaves slot2_comps*4 bytes and the descriptor matches). When a
+      // bound location is missing, sequential declaration order may put uv
+      // at 1 with no color — that is still accepted (vec2/float at 1 means
+      // "no color stream"; the facade fills color from the current value).
+      // Location 3 is UV2/lightmap (float2 after int-attr conversion).
+      if (loc == 0 && msl != "float4" && msl != "float3")
+        return fail("location 0 must be vec4/vec3: " + d.name);
+      if (loc == 1 && msl != "float4" && msl != "float3" && msl != "float2" &&
+          msl != "float")
+        return fail("location 1 must be a float vector: " + d.name);
+      if (loc == 3 && msl != "float2" && msl != "float")
+        return fail("location 3 must be float2/float: " + d.name);
       for (const Attr& a : attrs) {
         if (a.loc == loc)
           return fail("duplicate attribute location: " + d.name);
       }
-      attrs.push_back({d.name, msl, loc, is_int});
+      std::string int_cast;
+      if (is_int) {
+        UniformLayout lay;
+        if (UniformLayoutOf(d.type, &lay)) int_cast = lay.msl;
+      }
+      attrs.push_back({d.name, msl, loc, is_int, int_cast});
       int_attribs = int_attribs || is_int;
-      if (d.location < 0) ++next_loc;
+      // Sequential counter tracks max used+1 so a later unbound `in` never
+      // collides with a bound location assigned out of declaration order.
+      if (loc + 1 > next_loc) next_loc = loc + 1;
     }
   }
-  bool has0 = false, has1 = false, has2 = false;
+  bool has0 = false, has2 = false, has3 = false;
   for (const Attr& a : attrs) {
     if (a.loc == 0) has0 = true;
-    if (a.loc == 1) has1 = true;
     if (a.loc == 2) has2 = true;
+    if (a.loc == 3) has3 = true;
   }
-  if (!has0 || !has1)
-    return fail("vertex needs attribs at locations 0 and 1");
+  // Position is required unless the body synthesizes vertices from
+  // gl_VertexID (MC screenquad/clouds/panorama blit). Color is optional:
+  // POSITION-only formats never enable attrib 1 — the facade fills the
+  // color stream from the current generic value (spec 10.3.1).
+  const bool uses_vid_early = HasWord(vs, "gl_VertexID");
+  if (!has0 && !uses_vid_early)
+    return fail("vertex needs an attrib at location 0 (or gl_VertexID)");
+  if (attrs.empty() && !uses_vid_early)
+    return fail("vertex needs at least one attrib (or gl_VertexID)");
 
   // Integer attribs convert to float on the CPU (exact below 2^24); bitwise
   // ops on them would silently change meaning, so they fail closed here.
@@ -557,11 +891,14 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   struct SamplerInfo {
     std::string name;
     int kind = 0;  // 0=2D, 1=cube, 2=3D, 3=2D-array.
+    bool in_vs = false;
+    bool in_fs = false;
   };
   std::vector<SamplerInfo> samplers;
   int uniform_offset = 0;
   auto add_uniforms = [&](const std::string& src, const char* stage,
                           bool* failed) {
+    const bool is_vs = (std::string(stage) == "vertex");
     for (const Decl& d : FindDecls(src, "uniform")) {
       const bool is_sampler =
           (d.type == "sampler2D" || d.type == "samplerCube" ||
@@ -573,21 +910,30 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
           *failed = true;
           return;
         }
-        if (std::string(stage) != "fragment") {
-          out.error = "vertex texture fetch not supported: " + d.name;
-          *failed = true;
-          return;
-        }
+        // Vertex texture fetch (lightmap/overlay) and fragment sampling both
+        // supported; stage membership drives vs_main/fs_main texture params.
         bool known = false;
-        for (const auto& s : samplers)
-          if (s.name == d.name) known = true;
+        for (auto& s : samplers) {
+          if (s.name == d.name) {
+            known = true;
+            if (is_vs)
+              s.in_vs = true;
+            else
+              s.in_fs = true;
+          }
+        }
         if (!known) {
           const int kind = (d.type == "sampler2D")
                                ? 0
                                : (d.type == "samplerCube")
                                      ? 1
                                      : (d.type == "sampler3D") ? 2 : 3;
-          samplers.push_back({d.name, kind});
+          SamplerInfo si;
+          si.name = d.name;
+          si.kind = kind;
+          si.in_vs = is_vs;
+          si.in_fs = !is_vs;
+          samplers.push_back(si);
         }
         continue;
       }
@@ -693,14 +1039,29 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   }
   const int uniform_block_bytes = (uniform_offset + 15) / 16 * 16;
   out.uses_sampler = !samplers.empty();
-  for (const auto& s : samplers) out.sampler_names.push_back(s.name);
-  out.sampler_kinds.clear();
-  for (const auto& s : samplers) out.sampler_kinds.push_back(s.kind);
+  out.uses_vertex_sampler = false;
+  out.uses_fragment_sampler = false;
+  out.sampler_in_vs.clear();
+  out.sampler_in_fs.clear();
+  for (const auto& s : samplers) {
+    out.sampler_names.push_back(s.name);
+    out.sampler_kinds.push_back(s.kind);
+    out.sampler_in_vs.push_back(s.in_vs);
+    out.sampler_in_fs.push_back(s.in_fs);
+    if (s.in_vs) out.uses_vertex_sampler = true;
+    if (s.in_fs) out.uses_fragment_sampler = true;
+  }
   out.needs_slot2 = has2;
   out.slot2_comps = 0;
   for (const Attr& a : attrs) {
     if (a.loc == 2)
       out.slot2_comps = (a.msl == "float4") ? 4 : (a.msl == "float3" ? 3 : 2);
+  }
+  out.needs_slot3 = has3;
+  out.slot3_comps = 0;
+  for (const Attr& a : attrs) {
+    if (a.loc == 3)
+      out.slot3_comps = (a.msl == "float4") ? 4 : (a.msl == "float3" ? 3 : 2);
   }
   out.uniforms = uniforms;
   out.uniform_block_bytes = uniform_block_bytes;
@@ -708,12 +1069,14 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   for (const auto& b : ubos) {
     glsl::UboBlock o;
     o.name = b.name;
+    o.block_name = b.block_name;
     o.total_bytes = b.total_bytes;
     for (const auto& m : b.members) {
       glsl::UboMember om;
       om.name = m.name;
       om.msl_type = m.msl;
       om.float_count = m.floats;
+      om.offset = m.offset;
       o.members.push_back(om);
     }
     out.ubo_blocks.push_back(o);
@@ -844,10 +1207,14 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   }
 
   // ---- Bodies. ----
-  std::string vbody = MainBody(vs);
-  std::string fbody = MainBody(fs);
-  if (vbody.empty()) return fail("vertex main body not found");
-  if (fbody.empty()) return fail("fragment main body not found");
+  // Re-emit depth-0 global var decls (animate_sprite positions[] / SPIRV-Cross
+  // `_60`) at the top of main — MainBody alone would drop them.
+  const std::string vmain = MainBody(vs);
+  const std::string fmain = MainBody(fs);
+  if (vmain.empty()) return fail("vertex main body not found");
+  if (fmain.empty()) return fail("fragment main body not found");
+  std::string vbody = ExtractGlobalConstDecls(vs) + vmain;
+  std::string fbody = ExtractGlobalConstDecls(fs) + fmain;
   if (!HasWord(vbody, "gl_Position"))
     return fail("vertex main must assign gl_Position");
   if (!deny_int_ops(vbody, "vertex") || !deny_int_ops(fbody, "fragment"))
@@ -884,9 +1251,21 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
     msl << "};\n";
   }
   msl << "struct VertexIn {\n";
-  for (const Attr& a : attrs)
+  // Metal stage_in still needs the attribute(0)/(1) slots the keyed vertex
+  // descriptor always sets (pos/col, stride 32) even when the app shader
+  // never declares them (gl_VertexID-only / POSITION-only). Unused members
+  // are legal MSL; omitting attribute(0) while the descriptor provides it
+  // is also legal, but an empty VertexIn with a non-empty descriptor has
+  // been rejected by older Metal compilers — pad to match the facade.
+  bool saw0 = false, saw1 = false;
+  for (const Attr& a : attrs) {
     msl << "  " << a.msl << " " << a.name << " [[attribute(" << a.loc
         << ")]];\n";
+    if (a.loc == 0) saw0 = true;
+    if (a.loc == 1) saw1 = true;
+  }
+  if (!saw0) msl << "  float4 _tgl_pad_pos [[attribute(0)]];\n";
+  if (!saw1) msl << "  float4 _tgl_pad_col [[attribute(1)]];\n";
   msl << "};\nstruct Uniforms {\n";
   for (const auto& u : uniforms) {
     msl << "  " << u.msl_type << " " << mangle(u.name);
@@ -919,11 +1298,364 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
         << " [[color(0), index(1)]];\n};\n";
   }
 
+  // Free functions outside main (fog/light helpers). Emit once (vs-first
+  // dedupe), rewritten like a stage body so constructors/UBO members match
+  // MSL. Helpers that sample textures (sample_lightmap) rewrite their
+  // sampler params to MSL texture/sampler pairs and texture() to sample();
+  // call sites in main expand `fn(Sampler, ...)` to `fn(Sampler_tex,
+  // Sampler_smp, ...)` during the stage-body rewrite below.
+  struct FreeFnInfo {
+    std::string name;
+    std::vector<int> sampler_positions;  // 0-based param indices that are samplers.
+    // Params whose GLSL int/uint type was widened to float (MSL texture
+    // sample coords are float): call-site args need an explicit floatN(...)
+    // wrap — MSL has no implicit intN->floatN vector conversion.
+    std::map<int, std::string> float_cast_positions;
+    std::vector<std::string> sampler_param_names;  // bare param names of samplers.
+    bool has_texture = false;
+  };
+  std::vector<FreeFnInfo> free_fns;
+  std::vector<std::string> free_fn_srcs;
+  {
+    std::string gsrc = ExtractGlobalFunctions(vs) + ExtractGlobalFunctions(fs);
+    std::vector<std::string> seen_names;
+    static const std::regex kFnName(
+        R"(\b(?:void|float|int|uint|bool|vec[234]|ivec[234]|uvec[234]|bvec[234]|mat[234](?:x[234])?)\s+([A-Za-z_]\w*)\s*\()");
+    std::size_t pos = 0;
+    while (pos < gsrc.size()) {
+      std::smatch m;
+      const std::string tail = gsrc.substr(pos);
+      if (!std::regex_search(tail, m, kFnName)) break;
+      const auto full = pos + static_cast<std::size_t>(m.position());
+      const std::string name = m[1].str();
+      const auto brace_rel = full + static_cast<std::size_t>(m.length()) - 1;
+      int depth = 0;
+      std::size_t close = std::string::npos;
+      for (std::size_t i = brace_rel; i < gsrc.size(); ++i) {
+        if (gsrc[i] == '{') ++depth;
+        if (gsrc[i] == '}') {
+          if (--depth == 0) {
+            close = i;
+            break;
+          }
+        }
+      }
+      if (close == std::string::npos) break;
+      std::string fn = gsrc.substr(full, close - full + 1);
+      pos = close + 1;
+      // Dedupe key = name + raw params so overloads (sampleNearest x2 in
+      // terrain.fsh) both emit, while the same fog.glsl copy from vs+fs
+      // collapses to one definition.
+      const auto sig_paren = fn.find('(');
+      const auto sig_brace = fn.find('{');
+      const std::string sig_key =
+          (sig_paren != std::string::npos && sig_brace != std::string::npos &&
+           sig_brace > sig_paren)
+              ? fn.substr(sig_paren, sig_brace - sig_paren)
+              : std::string();
+      const std::string dedupe_key = name + sig_key;
+      bool dup = false;
+      for (const auto& n : seen_names)
+        if (n == dedupe_key) dup = true;
+      if (dup || name == "main") continue;
+      seen_names.push_back(dedupe_key);
+      // Free functions have no `uni`/`UBO` params (those live on entry
+      // points only) — only rewrite constructors and MSL-missing builtins.
+      // Call sites inside main already carry Block.member / uni. prefixes.
+      fn = ReplaceWord(fn, "not", "!");
+      fn = ReplaceWord(fn, "lessThanEqual", "islessequal");
+      fn = ReplaceWord(fn, "greaterThanEqual", "isgreaterequal");
+      fn = ReplaceWord(fn, "lessThan", "isless");
+      fn = ReplaceWord(fn, "greaterThan", "isgreater");
+      fn = ReplaceWord(fn, "notEqual", "isnotequal");
+      fn = ReplaceWord(fn, "equal", "isequal");
+      fn = ReplaceWord(fn, "dFdx", "dfdx");
+      fn = ReplaceWord(fn, "dFdy", "dfdy");
+
+      // ---- Texture-sampling helpers (sample_lightmap / sampleNearest). ----
+      const bool has_tex = fn.find("texture(") != std::string::npos ||
+                           fn.find("textureLod(") != std::string::npos ||
+                           fn.find("textureGrad(") != std::string::npos;
+      const bool has_texel = fn.find("texelFetch(") != std::string::npos;
+      FreeFnInfo info;
+      info.name = name;
+      info.has_texture = has_tex;
+      if (has_texel) {
+        return fail(
+            "global helper uses texelFetch (not rewritten): " + name);
+      }
+      // Parse params whenever the signature is present: sampler detection
+      // must not depend on a direct texture( call — wrappers (terrain.fsh's
+      // 3-param sampleNearest) only forward to another helper and still
+      // need their sampler2D param rewritten to a tex/smp pair.
+      struct Fp {
+        std::string type;
+        std::string name;
+      };
+      std::vector<Fp> params;
+      const auto paren = fn.find('(');
+      const auto body_brace = fn.find('{');
+      const bool sig_ok =
+          paren != std::string::npos && body_brace != std::string::npos &&
+          body_brace > paren;
+      if (has_tex && !sig_ok) {
+        return fail("global helper signature parse failed: " + name);
+      }
+      auto is_sampler_type = [](const std::string& t) {
+        return t == "sampler2D" || t == "samplerCube" || t == "sampler3D" ||
+               t == "sampler2DArray";
+      };
+      auto int_to_float = [](const std::string& t) -> std::string {
+        if (t == "int" || t == "uint") return "float";
+        if (t == "ivec2" || t == "uvec2") return "float2";
+        if (t == "ivec3" || t == "uvec3") return "float3";
+        if (t == "ivec4" || t == "uvec4") return "float4";
+        return {};
+      };
+      if (sig_ok) {
+        const std::string params_src =
+            fn.substr(paren + 1, body_brace - paren - 1);
+        {
+          int d = 0;
+          std::string cur;
+          auto flush = [&]() {
+            std::string t = cur;
+            // trim
+            while (!t.empty() && (t.front() == ' ' || t.front() == '\n'))
+              t.erase(t.begin());
+            while (!t.empty() && (t.back() == ' ' || t.back() == '\n'))
+              t.pop_back();
+            if (t.empty()) return;
+            auto sp = t.find_last_of(" \t\n");
+            if (sp == std::string::npos) return;
+            params.push_back({t.substr(0, sp), t.substr(sp + 1)});
+            cur.clear();
+          };
+          for (char c : params_src) {
+            if (c == '(' || c == '<' ) ++d;
+            if (c == ')' || c == '>') --d;
+            if (c == ',' && d == 0) {
+              flush();
+            } else {
+              cur.push_back(c);
+            }
+          }
+          flush();
+        }
+      }
+      bool has_sampler = false;
+      for (const Fp& p : params)
+        if (is_sampler_type(p.type)) has_sampler = true;
+      // texture() on a helper with no sampler param samples a stage-global
+      // sampler that MSL free fns cannot see — fail closed.
+      if (has_tex && !has_sampler)
+        return fail("global helper texture sample not on a sampler param: " +
+                    name);
+      if (has_sampler) {
+        // Rewrite signature params: samplers → MSL tex/smp pair; integer
+        // coords → float (texture() sample coords are float in MSL).
+        std::string new_params;
+        for (std::size_t pi = 0; pi < params.size(); ++pi) {
+          const Fp& p = params[pi];
+          if (!new_params.empty()) new_params += ", ";
+          if (is_sampler_type(p.type)) {
+            const char* tex_type =
+                (p.type == "sampler2D")
+                    ? "texture2d<float>"
+                    : (p.type == "samplerCube")
+                          ? "texturecube<float>"
+                          : (p.type == "sampler3D") ? "texture3d<float>"
+                                                    : "texture2d_array<float>";
+            new_params += std::string(tex_type) + " " + p.name +
+                          "_tex, sampler " + p.name + "_smp";
+            info.sampler_positions.push_back(static_cast<int>(pi));
+            info.sampler_param_names.push_back(p.name);
+          } else {
+            const std::string ft = int_to_float(p.type);
+            if (!ft.empty())
+              info.float_cast_positions[static_cast<int>(pi)] = ft;
+            new_params += (ft.empty() ? p.type : ft) + " " + p.name;
+          }
+        }
+        fn = fn.substr(0, paren + 1) + new_params + fn.substr(body_brace);
+        if (has_tex) {
+          // Rewrite texture(param, ...) inside the helper body.
+          bool any_tex = false;
+          for (std::size_t pi = 0; pi < params.size(); ++pi) {
+            if (!is_sampler_type(params[pi].type)) continue;
+            const int kind = (params[pi].type == "sampler2D")
+                                 ? 0
+                                 : (params[pi].type == "samplerCube")
+                                       ? 1
+                                       : (params[pi].type == "sampler3D") ? 2 : 3;
+            std::string err;
+            if (RewriteTextureCalls(fn, params[pi].name, kind, &err)) {
+              any_tex = true;
+            } else if (err.find("never sampled") != std::string::npos) {
+              // texture() in the helper used a non-param (global) sampler —
+              // MSL free fns cannot see stage texture bindings; fail closed.
+              return fail("global helper uses non-param texture(): " + name);
+            } else {
+              return fail("global helper texture rewrite: " + name + ": " + err);
+            }
+          }
+          if (!any_tex)
+            return fail("global helper texture sample not on a sampler param: " +
+                        name);
+        }
+      }
+      free_fn_srcs.push_back(fn);
+      free_fns.push_back(info);
+    }
+  }
+
+  // Expand free-fn call sites that pass a sampler: `fn(S, args)` →
+  // `fn(S_tex, S_smp, args)`. Stage mains match known sampler uniform names;
+  // free-fn bodies additionally match the enclosing helper's own sampler
+  // param names (extra_known — terrain.fsh sampleRGSS forwarding `source`).
+  auto expand_free_fn_calls = [&](std::string& body,
+                                  const std::vector<std::string>& extra_known,
+                                  std::size_t search_from = 0) {
+    for (const FreeFnInfo& info : free_fns) {
+      if (info.sampler_positions.empty()) continue;
+      std::size_t search = search_from;
+      while (search < body.size()) {
+        const auto at = body.find(info.name + "(", search);
+        if (at == std::string::npos) break;
+        // Word-boundary before the name.
+        if (at > 0 && (std::isalnum(static_cast<unsigned char>(body[at - 1])) ||
+                       body[at - 1] == '_')) {
+          search = at + info.name.size();
+          continue;
+        }
+        const auto open = at + info.name.size();
+        int d = 0;
+        std::size_t close = std::string::npos;
+        for (std::size_t i = open; i < body.size(); ++i) {
+          if (body[i] == '(') ++d;
+          if (body[i] == ')') {
+            if (--d == 0) {
+              close = i;
+              break;
+            }
+          }
+        }
+        if (close == std::string::npos) break;
+        const std::string args_src = body.substr(open + 1, close - open - 1);
+        std::vector<std::string> args;
+        {
+          int ad = 0;
+          std::string cur;
+          for (char c : args_src) {
+            if (c == '(') ++ad;
+            if (c == ')') --ad;
+            if (c == ',' && ad == 0) {
+              args.push_back(cur);
+              cur.clear();
+            } else {
+              cur.push_back(c);
+            }
+          }
+          args.push_back(cur);
+        }
+        bool changed = false;
+        // int/uint params widened to float: wrap the call-site arg so the
+        // type matches the rewritten signature (no implicit intN->floatN).
+        for (const auto& fc : info.float_cast_positions) {
+          const std::size_t pi = fc.first;
+          if (pi >= args.size()) continue;
+          const std::string& raw = args[pi];
+          const std::size_t b =
+              raw.find_first_not_of(" \t\n\r");
+          if (b == std::string::npos) continue;
+          const std::size_t e = raw.find_last_not_of(" \t\n\r");
+          args[pi] = raw.substr(0, b) + fc.second + "(" +
+                     raw.substr(b, e - b + 1) + ")" + raw.substr(e + 1);
+          changed = true;
+        }
+        for (int sp : info.sampler_positions) {
+          if (sp < 0 || static_cast<std::size_t>(sp) >= args.size()) continue;
+          std::string a = args[static_cast<std::size_t>(sp)];
+          std::string t = a;
+          while (!t.empty() && (t.front() == ' ' || t.front() == '\n'))
+            t.erase(t.begin());
+          while (!t.empty() && (t.back() == ' ' || t.back() == '\n'))
+            t.pop_back();
+          // Strip optional in./uni. prefix for matching the uniform name.
+          std::string bare = t;
+          std::string prefix;
+          if (bare.rfind("in.", 0) == 0) {
+            prefix = "in.";
+            bare = bare.substr(3);
+          } else if (bare.rfind("uni.", 0) == 0) {
+            prefix = "uni.";
+            bare = bare.substr(4);
+          }
+          bool known = false;
+          for (const auto& sn : out.sampler_names)
+            if (sn == bare) known = true;
+          if (!known)
+            for (const auto& sn : extra_known)
+              if (sn == bare) known = true;
+          if (!known) continue;
+          // Rebuild with leading whitespace preserved on the first half.
+          // Suffix = text AFTER the uniform name only (was: everything from
+          // li, which re-appended the name itself -> `S_smpS` garbage).
+          std::string lead;
+          std::size_t li = 0;
+          while (li < a.size() && (a[li] == ' ' || a[li] == '\n')) {
+            lead.push_back(a[li]);
+            ++li;
+          }
+          const std::size_t name_at = li + prefix.size();
+          args[static_cast<std::size_t>(sp)] =
+              lead + bare + "_tex, " + bare + "_smp" +
+              a.substr(name_at + bare.size());
+          changed = true;
+        }
+        if (changed) {
+          std::string rebuilt;
+          for (std::size_t ai = 0; ai < args.size(); ++ai) {
+            if (ai) rebuilt += ", ";
+            rebuilt += args[ai];
+          }
+          body = body.substr(0, open + 1) + rebuilt + body.substr(close);
+          search = open + 1 + rebuilt.size();
+        } else {
+          search = close + 1;
+        }
+      }
+    }
+  };
+
+  // Emit collected helpers now that expand_free_fn_calls exists: first the
+  // in-helper forwarders (sampleRGSS -> sampleNearest(source,...)), then the
+  // rewritten source itself. Scanning starts after the body's '{' so the
+  // helper's own signature head is never treated as a call site (float_cast
+  // would wrap signature params: `float2(sampler x_smp)`).
+  for (std::size_t fi = 0; fi < free_fn_srcs.size(); ++fi) {
+    const auto body_at = free_fn_srcs[fi].find('{');
+    const std::size_t from =
+        body_at == std::string::npos ? 0 : body_at + 1;
+    expand_free_fn_calls(free_fn_srcs[fi], free_fns[fi].sampler_param_names,
+                         from);
+    msl << SuffixFloatLiterals(
+               RewriteArrayCtors(RewriteConstructors(free_fn_srcs[fi])))
+        << "\n";
+  }
+
   // Vertex: prefix attribs with in., outs with out., uniforms with uni.,
   // gl_Position with out.position. Struct leaves (`u.member`) use escaped
   // dots -> `uni.u_member`; arrays (`u[0]`) fall out of the base word rewrite.
   std::string vb = vbody;
-  for (const Attr& a : attrs) vb = ReplaceWord(vb, a.name, "in." + a.name);
+  for (const Attr& a : attrs) {
+    // Integer attribs arrive as floatN in VertexIn; cast back on read so
+    // `ivec2 p = UV2;` becomes `int2 p = int2(in.UV2);` (valid MSL).
+    if (a.is_int && !a.int_cast.empty())
+      vb = ReplaceWord(vb, a.name, a.int_cast + "(in." + a.name + ")");
+    else
+      vb = ReplaceWord(vb, a.name, "in." + a.name);
+  }
   for (const auto& v : varyings) vb = ReplaceWord(vb, v.name, "out." + v.name);
   for (const auto& u : uniforms) {
     if (u.name.find('.') != std::string::npos) {
@@ -938,6 +1670,14 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
       vb = std::regex_replace(vb, re, "uni." + mangle(u.name));
     } else {
       vb = ReplaceWord(vb, u.name, "uni." + mangle(u.name));
+    }
+  }
+  for (const auto& b : ubos) {
+    for (const auto& m : b.members) {
+      // Same bare-member / Block.member rewrite as the fragment body
+      // (vertex UBOs: DynamicTransforms/Projection in MC gui/shader pairs).
+      std::regex re("(^|[^.\\w])" + m.name + "\\b");
+      vb = std::regex_replace(vb, re, "$1" + b.name + "." + m.name);
     }
   }
   // 11a: IDs become Metal stage params (int-cast: GLSL int vs MSL uint).
@@ -957,15 +1697,59 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   // of isnotequal/islessequal/isgreaterequal (all already rewritten above,
   // so a bare equal( here is genuinely GLSL equal().
   vb = ReplaceWord(vb, "equal", "isequal");
+  // Derivative built-ins: MSL spells them `dfdx`/`dfdy` (lowercase, proven
+  // by compiling both spellings on-device); `fwidth` matches in both
+  // languages. Coarse variants never reach here (kDeny fails them closed).
+  // \b keeps `dFdxCoarse` safe even if the deny ever lifted (no boundary
+  // between `dFdx` and `Coarse`).
+  vb = ReplaceWord(vb, "dFdx", "dfdx");
+  vb = ReplaceWord(vb, "dFdy", "dfdy");
+  // Vertex texture fetch: expand free-fn sampler args, then rewrite any
+  // direct texture()/textureLod( for samplers declared in the VS.
+  expand_free_fn_calls(vb, {});
+  std::vector<bool> sampler_sampled(samplers.size(), false);
+  std::string tex_err;
+  auto rewrite_stage_textures = [&](std::string& body,
+                                    bool stage_is_vs) -> bool {
+    for (std::size_t si = 0; si < samplers.size(); ++si) {
+      const SamplerInfo& s = samplers[si];
+      if (stage_is_vs ? !s.in_vs : !s.in_fs) continue;
+      const std::regex re("\\btexture(Lod|Grad)?\\s*\\(\\s*" + s.name + "\\s*,");
+      const bool has_direct = std::regex_search(body, re);
+      const bool has_via_fn = body.find(s.name + "_tex") != std::string::npos;
+      if (has_direct) {
+        if (!RewriteTextureCalls(body, s.name, s.kind, &tex_err))
+          return false;
+        sampler_sampled[si] = true;
+      } else if (has_via_fn) {
+        sampler_sampled[si] = true;
+      }
+    }
+    return true;
+  };
+  if (!rewrite_stage_textures(vb, true)) return fail(tex_err);
   msl << "vertex Varyings vs_main(VertexIn in [[stage_in]], constant "
          "Uniforms& uni [[buffer(0)]]";
   if (use_iid) msl << ", uint iid [[instance_id]]";
   if (use_vid) msl << ", uint vid [[vertex_id]]";
+  {
+    int slot = 0;
+    for (const auto& s : samplers) {
+      if (!s.in_vs) continue;
+      const char* tex_type = (s.kind == 0)   ? "texture2d<float>"
+                             : (s.kind == 1) ? "texturecube<float>"
+                             : (s.kind == 2) ? "texture3d<float>"
+                                             : "texture2d_array<float>";
+      msl << ", " << tex_type << " " << s.name << "_tex [[texture(" << slot
+          << ")]], sampler " << s.name << "_smp [[sampler(" << slot << ")]]";
+      ++slot;
+    }
+  }
   for (std::size_t i = 0; i < ubos.size(); ++i)
     msl << ", constant " << ubos[i].name << "_t& " << ubos[i].name
         << " [[buffer(" << (2 + i) << ")]]";
   msl << ") {\n  Varyings out;\n"
-      << SuffixFloatLiterals(RewriteConstructors(vb))
+      << SuffixFloatLiterals(RewriteArrayCtors(RewriteConstructors(vb)))
       << "\n  out.position.z = out.position.z * 0.5f + out.position.w * 0.5f;\n"
          "  return out;\n}\n";
 
@@ -1000,10 +1784,8 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
       fb = std::regex_replace(fb, re, "$1" + b.name + "." + m.name);
     }
   }
-  for (const auto& s : samplers) {
-    std::string err;
-    if (!RewriteTextureCalls(fb, s.name, s.kind, &err)) return fail(err);
-  }
+  expand_free_fn_calls(fb, {});
+  if (!rewrite_stage_textures(fb, false)) return fail(tex_err);
   fb = ReplaceWord(fb, "discard", "discard_fragment()");
   if (use_front_facing) fb = ReplaceWord(fb, "gl_FrontFacing", "in_ff");
   fb = ReplaceWord(fb, "not", "!");
@@ -1013,11 +1795,15 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
   fb = ReplaceWord(fb, "greaterThan", "isgreater");
   fb = ReplaceWord(fb, "notEqual", "isnotequal");
   fb = ReplaceWord(fb, "equal", "isequal");
+  // Same derivative spelling fix as the vertex stage (see above).
+  fb = ReplaceWord(fb, "dFdx", "dfdx");
+  fb = ReplaceWord(fb, "dFdy", "dfdy");
   const std::string frag_ret =
       mrt ? "FragOut" : (dual ? "DualOut" : "float4");
   msl << "fragment " << frag_ret << " fs_main(Varyings in [[stage_in]]";
   int slot = 0;
   for (const auto& s : samplers) {
+    if (!s.in_fs) continue;
     const char* tex_type = (s.kind == 0)   ? "texture2d<float>"
                            : (s.kind == 1) ? "texturecube<float>"
                            : (s.kind == 2) ? "texture3d<float>"
@@ -1037,16 +1823,24 @@ TranslatedProgram TranslateProgram(const std::string& vs_src,
     std::string fb2 = fb;
     for (const auto& n : out.frag_out_names)
       fb2 = ReplaceWord(fb2, n, "o." + n);
-    msl << SuffixFloatLiterals(RewriteConstructors(fb2)) << "\n  return o;\n}\n";
+    msl << SuffixFloatLiterals(RewriteArrayCtors(RewriteConstructors(fb2)))
+        << "\n  return o;\n}\n";
   } else {
     const std::string& n = out.frag_out_names[0];
     msl << "  float4 " << n << ";\n"
-        << SuffixFloatLiterals(RewriteConstructors(fb)) << "\n  return " << n
-        << ";\n}\n";
+        << SuffixFloatLiterals(RewriteArrayCtors(RewriteConstructors(fb)))
+        << "\n  return " << n << ";\n}\n";
+  }
+
+  for (std::size_t si = 0; si < samplers.size(); ++si) {
+    if ((samplers[si].in_vs || samplers[si].in_fs) && !sampler_sampled[si])
+      return fail(
+          "declared sampler never sampled with texture(): " +
+          samplers[si].name);
   }
 
   out.ok = true;
-  out.library_source = msl.str();
+  out.library_source = RewriteBoolMixToSelect(msl.str());
   return out;
 }
 

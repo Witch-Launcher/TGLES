@@ -121,8 +121,8 @@ void HostRuntime::DrawRangeElements(GLenum mode, GLuint start, GLuint end,
   }
   // Range is a validation refinement; execution matches DrawElements.
   gl_.SyncElementState();
-  gl_.draw().DrawRangeElements(mode, start, end, count, type, indices);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawRangeElements(mode, start, end, count, type, indices))
+    return;
   gl_.RenderElements(*bridge_, mode, count, type, indices);
 }
 
@@ -134,8 +134,8 @@ void HostRuntime::DrawElementsBaseVertex(GLenum mode, GLsizei count,
     return;
   }
   gl_.SyncElementState();
-  gl_.draw().DrawElementsBaseVertex(mode, count, type, indices, basevertex);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawElementsBaseVertex(mode, count, type, indices, basevertex))
+    return;
   if (bridge_ == nullptr) return;
   // Executed: CPU-side index rebasing in the facade, then the shared submit
   // path (same as RenderElementsIndirect's baseVertex handling).
@@ -151,9 +151,9 @@ void HostRuntime::DrawRangeElementsBaseVertex(
     return;
   }
   gl_.SyncElementState();
-  gl_.draw().DrawRangeElementsBaseVertex(mode, start, end, count, type,
-                                         indices, basevertex);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawRangeElementsBaseVertex(mode, start, end, count, type,
+                                              indices, basevertex))
+    return;
   if (bridge_ == nullptr) return;
   gl_.RenderRangeElementsBaseVertex(*bridge_, mode, start, end, count, type,
                                     indices, basevertex);
@@ -167,9 +167,9 @@ void HostRuntime::DrawElementsInstancedBaseVertex(
     return;
   }
   gl_.SyncElementState();
-  gl_.draw().DrawElementsInstancedBaseVertex(mode, count, type, indices,
-                                             instanceCount, basevertex);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawElementsInstancedBaseVertex(mode, count, type, indices,
+                                                  instanceCount, basevertex))
+    return;
   if (bridge_ == nullptr) return;
   gl_.RenderElementsInstancedBaseVertex(bridge_, mode, count, type, indices,
                                         instanceCount, basevertex);
@@ -183,8 +183,8 @@ void HostRuntime::DrawArraysInstancedBaseInstance(GLenum mode, GLint first,
     host_errors_.Record(kGlInvalidOperation);
     return;
   }
-  gl_.draw().DrawArraysInstanced(mode, first, count, instanceCount);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawArraysInstanced(mode, first, count, instanceCount))
+    return;
   if (bridge_ == nullptr) return;
   gl_.RenderArraysInstancedBaseInstance(bridge_, mode, first, count,
                                         instanceCount, baseInstance);
@@ -198,8 +198,9 @@ void HostRuntime::DrawElementsInstancedBaseInstance(
     return;
   }
   gl_.SyncElementState();
-  gl_.draw().DrawElementsInstanced(mode, count, type, indices, instanceCount);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawElementsInstanced(mode, count, type, indices,
+                                        instanceCount))
+    return;
   if (bridge_ == nullptr) return;
   gl_.RenderElementsInstancedBaseInstance(bridge_, mode, count, type, indices,
                                           instanceCount, baseInstance);
@@ -213,9 +214,9 @@ void HostRuntime::DrawElementsInstancedBaseVertexBaseInstance(
     return;
   }
   gl_.SyncElementState();
-  gl_.draw().DrawElementsInstancedBaseVertex(mode, count, type, indices,
-                                             instanceCount, basevertex);
-  if (gl_.draw().HasPending()) return;
+  if (!gl_.draw().DrawElementsInstancedBaseVertex(mode, count, type, indices,
+                                                  instanceCount, basevertex))
+    return;
   if (bridge_ == nullptr) return;
   gl_.RenderElementsInstancedBaseVertexBaseInstance(
       bridge_, mode, count, type, indices, instanceCount, basevertex,

@@ -319,6 +319,19 @@ int tglHostResizeMetalLayer(int width, int height);
 int tglHostPresent(void);
 int tglHostReadbackPixel(int x, int y, unsigned char out_rgba[4]);
 unsigned long long tglHostFrameSerial(void);
+// --- TGL debug-log channel (also NOT part of the Khronos/MobileGL contract)
+// The `[TGL-DEBUG]` text names the reason of every fail-closed path. stderr
+// never reaches a launcher-owned log file on iOS, so the same text is kept
+// in a bounded in-memory ring the launcher polls (e.g. once per second or
+// after a black frame) and appends to its own log.
+//   mode: bitmask, bit0 (1) = stderr sink, bit1 (2) = memory ring.
+//         0 silences the channel completely; default is 3 (both on).
+//   tglHostGetDebugLog drains the ring: copies up to capacity-1 bytes plus
+//   NUL, returns bytes written excluding NUL. With out==NULL or
+//   capacity<=0 it returns the pending byte count and drains nothing.
+// Resolvable via BOTH dlsym and eglGetProcAddress (same single-table rule).
+void tglHostSetDebugLog(int mode);
+int tglHostGetDebugLog(char* out, int capacity);
 
 #ifdef __cplusplus
 }  // extern "C"

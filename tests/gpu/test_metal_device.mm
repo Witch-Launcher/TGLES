@@ -293,6 +293,8 @@ TEST(MetalTranslation, FacadeBlendReachesPixels) {
       tgles::kGlDrawFramebuffer, tgles::kGlColorAttachment0,
       tgles::kGlTexture2d, t, 0);
   // The GLES API under test: enable + func bilingual in intent, one call.
+  // Opaque black clear so blend math uses dst alpha=1 (GL default is 0).
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.foundation().Enable(tgles::kGlBlend);
   ctx.raster().BlendFunc(tgles::kGlSrcAlpha, tgles::kGlOneMinusSrcAlpha);
   EXPECT_TRUE(ctx.RenderFrame(*bridge, tgles::kGlTriangles, 0, 3));
@@ -382,7 +384,7 @@ TEST(MetalDevice, RealAppDataPathDrawsRed) {
 
   CAMetalLayer* layer = [CAMetalLayer layer];
   bridge->SetLayer((__bridge void*)layer, 16, 16);
-  // RenderFrame already committed the frame; present it for real.
+  // RenderFrame leaves the frame open (multi-draw); Present seals it.
   EXPECT_TRUE(bridge->Present());
   EXPECT_TRUE(bridge->WaitForCompletion(bridge->FrameSerial()));
   std::uint8_t px[4] = {0};

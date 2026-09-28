@@ -8,6 +8,48 @@
 #include "tgles/state/vertex_array.h"  // kGlFloat etc. + kMaxVertexAttribs.
 
 namespace tgles {
+namespace {
+
+// Strip // and /* */ comments so link-time reflection matches the same text
+// the GLSL->MSL translator sees (StripComments). Keeps newlines for line
+// positions in multi-line declarations.
+std::string StripGlslComments(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  bool line = false, block = false;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (line) {
+      if (s[i] == '\n') {
+        line = false;
+        out += '\n';
+      }
+      continue;
+    }
+    if (block) {
+      if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+        block = false;
+        ++i;
+      } else if (s[i] == '\n') {
+        out += '\n';
+      }
+      continue;
+    }
+    if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+      line = true;
+      ++i;
+      continue;
+    }
+    if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+      block = true;
+      ++i;
+      continue;
+    }
+    out += s[i];
+  }
+  return out;
+}
+
+}  // namespace
 
 ProgramManager::ProgramManager(ShaderManager* shaders) : shaders_(shaders) {}
 
@@ -65,6 +107,8 @@ void ProgramManager::DeleteProgram(GLuint program) {
   if (program == 0) return;
   auto it = programs_.find(program);
   if (it == programs_.end() || !it->second.alive) return;
+  for (GLuint s : it->second.attached) shaders_->NotifyDetach(s);
+  it->second.attached.clear();
   it->second.alive = false;
   if (current_program_ == program) current_program_ = 0;
 }
@@ -87,6 +131,7 @@ void ProgramManager::AttachShader(GLuint program, GLuint shader) {
     }
   }
   prog->attached.push_back(shader);
+  shaders_->NotifyAttach(shader);
 }
 
 void ProgramManager::DetachShader(GLuint program, GLuint shader) {
@@ -98,6 +143,7 @@ void ProgramManager::DetachShader(GLuint program, GLuint shader) {
   for (auto it = prog->attached.begin(); it != prog->attached.end(); ++it) {
     if (*it == shader) {
       prog->attached.erase(it);
+      shaders_->NotifyDetach(shader);
       return;
     }
   }
@@ -110,9 +156,14 @@ void ProgramManager::ParseLink(Program& prog) {
   prog.uniform_blocks.clear();
   GLint next_uniform_loc = 0;
   GLint next_attrib_loc = 0;
+  // Optional layout(...) + optional precision qualifier before the type.
+  // Mirrors FindDecls in glsl_to_msl (layout) plus desktop/ES precision so
+  // `uniform mediump sampler2D Sprite;` and `layout(binding=0) uniform ...`
+  // both reflect. Comment-stripped sources avoid matching inside // lines.
   static const std::regex kUniform(
-      R"(uniform\s+(\w+)\s+(\w+)(?:\s*\[\s*(\d*)\s*\])?\s*;)");
-  static const std::regex kUniformBlock(R"(uniform\s+(\w+)\s*\{)");
+      R"((?:layout\s*\([^)]*\)\s*)?uniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s+(\w+)(?:\s*\[\s*(\d*)\s*\])?\s*;)");
+  static const std::regex kUniformBlock(
+      R"((?:layout\s*\([^)]*\)\s*)?uniform\s+(?:(?:lowp|mediump|highp)\s+)?(\w+)\s*\{([^}]*)\}\s*(\w+)?\s*;)");
   static const std::regex kAttrib(
       R"((?:layout\s*\(\s*location\s*=\s*(\d+)\s*\)\s*)?in\s+\w+\s+(\w+)\s*;)");
   static const std::regex kStruct(R"(struct\s+(\w+)\s*\{([^}]*)\}\s*;)");
@@ -121,7 +172,7 @@ void ProgramManager::ParseLink(Program& prog) {
   std::map<std::string, std::vector<std::pair<std::string, std::string>>>
       struct_members;
   for (GLuint s : prog.attached) {
-    const std::string src = shaders_->GetShaderSource(s);
+    const std::string src = StripGlslComments(shaders_->GetShaderSource(s));
     for (std::sregex_iterator it(src.begin(), src.end(), kStruct), end;
          it != end; ++it) {
       const std::string sname = (*it)[1].str();
@@ -136,7 +187,7 @@ void ProgramManager::ParseLink(Program& prog) {
     }
   }
   for (GLuint s : prog.attached) {
-    const std::string src = shaders_->GetShaderSource(s);
+    const std::string src = StripGlslComments(shaders_->GetShaderSource(s));
     const GLenum stage = shaders_->GetType(s);
     for (std::sregex_iterator it(src.begin(), src.end(), kUniformBlock), end;
          it != end; ++it) {
@@ -426,6 +477,9 @@ GLint ProgramManager::GetAttribLocation(GLuint program, const char* name) {
   for (const auto& a : prog->attribs) {
     if (a.name == name) return a.location;
   }
+  // Missing name is -1 with no error (spec 2.14.2: glGetAttribLocation on
+  // an inactive/unlisted name returns -1; the facade probes several
+  // semantic spellings and must not pollute GetError).
   return -1;
 }
 
@@ -1992,6 +2046,11 @@ bool ProgramManager::IsComputeAddOneProgram(GLuint program) {
 std::vector<ActiveUniform> ProgramManager::Uniforms(GLuint program) const {
   const Program* prog = FindProgram(program);
   return prog == nullptr ? std::vector<ActiveUniform>() : prog->uniforms;
+}
+
+std::vector<ActiveAttrib> ProgramManager::Attribs(GLuint program) const {
+  const Program* prog = FindProgram(program);
+  return prog == nullptr ? std::vector<ActiveAttrib>() : prog->attribs;
 }
 
 bool ProgramManager::GetUniformBlockBinding(GLuint program,

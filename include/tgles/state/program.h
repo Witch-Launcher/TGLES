@@ -348,6 +348,8 @@ class ProgramManager {
   // Test helpers.
   bool LinkSucceeded(GLuint program) const;
   std::vector<ActiveUniform> Uniforms(GLuint program) const;
+  // Link-parse active vertex attributes (name + assigned location).
+  std::vector<ActiveAttrib> Attribs(GLuint program) const;
   // True when a linked program contains the given shader stage.
   bool ProgramHasStage(GLuint program, GLenum shader_type) const;
   // Honest compute subset (ES 3.2 ch.19): true when the program's attached

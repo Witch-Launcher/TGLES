@@ -5,7 +5,9 @@
 // cross-module couplings, unifies error polling (distributed flag-code pairs,
 // spec 2.3.1) and exposes the conformance checklist + version report.
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -42,8 +44,19 @@ class GlesContext {
 
   // Cross-module wirings.
   void BindBuffer(GLenum target, GLuint buffer);  // Syncs VAO EAB state.
+  void BindVertexArray(GLuint array);  // Logs bound VAO + its EAB.
   void SyncIndirectState();  // Pushes DRAW_INDIRECT binding into validator.
   void SyncElementState();  // Pushes VAO EAB presence into validator.
+  void RenderElementsRejectDiag(GLenum mode, GLsizei count);  // Logs VAO/EAB.
+  // Resolves texel-transfer `pixels` when PIXEL_UNPACK_BUFFER is bound
+  // (spec 8.3/8.7): the pointer is a byte offset into the bound store
+  // (nullptr means offset 0). On success `*out` is the host address to
+  // unpack from (nullptr only when no PBO and the client pointer was null).
+  // Out-of-range PBO access records INVALID_OPERATION and returns false —
+  // callers must skip the transfer (never treat an offset as a host pointer).
+  bool ResolveTexelSource(const void* pixels, GLsizei width, GLsizei height,
+                          GLsizei depth, GLenum format, GLenum type,
+                          const void** out);
   // glClear on the CPU model (spec 17.3): forwards the raster clear color
   // into FramebufferManager::Clear (see its doc for the exact rules).
   void Clear(GLbitfield mask);
@@ -207,6 +220,34 @@ class GlesContext {
   bool DecodeIndicesWithBase(GLsizei count, GLenum type,
                              std::uintptr_t indices, GLint basevertex,
                              std::vector<VertexRef>& out);
+
+  // Draw-time fragment upload cache (SubmitVertices): keyed per sampler
+  // unit on a fingerprint of the sampled chain (level address + content
+  // revision + dims). The bridge re-creates its MTLTexture only when this
+  // changes — re-uploading every mip on every draw was the fps killer.
+  // `owner` is in the key: a different bridge instance never saw the
+  // upload (tests swap in Mock bridges).
+  struct FragUploadCache {
+    bool valid = false;
+    const metal_bridge::MetalBridge* owner = nullptr;
+    GLuint tex = 0;
+    std::uint64_t fp = 0;
+    int kind = -1;  // sampler kind (0..3), or 4 = legacy level-0 upload.
+    bool mips = false;   // mip vs non-mip bridge call variant (kinds 1-3).
+    bool srgb = false;
+  };
+  std::array<FragUploadCache, kMaxCombinedTextureImageUnits> frag_upload_{};
+  // GLSL->MSL translation reuse: TranslateProgram runs the full regex
+  // pipeline over the sources (ms-scale) — cached per program keyed on the
+  // source bytes + attrib layout, so a ShaderSource+relink invalidates it
+  // naturally (program ids are never reused).
+  struct TransCacheEntry {
+    std::uint64_t vs_hash = 0;
+    std::uint64_t fs_hash = 0;
+    std::uint64_t attrib_hash = 0;
+    glsl::TranslatedProgram trans;
+  };
+  std::map<GLuint, TransCacheEntry> trans_cache_;
 
   Context foundation_;
   BufferManager buffers_;

@@ -657,6 +657,8 @@ TEST(RealExecution, StencilNeverBlocksDraw) {
       tgles::kGlRenderbuffer, rb);
   // Stencil NEVER: gọi hợp lệ nhưng mọi fragment bị loại — màn hình đen,
   // không lỗi (đây mới là thực thi, không còn là validate-only).
+  // Opaque black clear so undrawn pixels keep alpha=255 (GL default is 0).
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.foundation().Enable(tgles::kGlStencilTest);
   ctx.raster().StencilFunc(tgles::kGlNever, 0, 0xFFu);
   EXPECT_EQ(ctx.raster().GetError(), tgles::kGlNoError);

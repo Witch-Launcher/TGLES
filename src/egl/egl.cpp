@@ -1,7 +1,10 @@
 #include "tgles/egl/egl.h"
 
+#include <chrono>
 #include <cstring>
+#include <pthread.h>
 
+#include "tgles/base/debug_log.h"
 #include "tgles/host/entry_points.h"
 
 namespace tgles {
@@ -464,6 +467,10 @@ EGLSurface EglState::CreateWindowSurface(EGLDisplay dpy, EGLConfig config,
   surf.alive = true;
   surf.is_window = true;
   surf.config = config;
+  // If the host already attached/resized the Metal layer, stamp that size
+  // onto surfaces created later (attach-before-create order).
+  surf.width = last_window_width_;
+  surf.height = last_window_height_;
   surfaces_[s] = surf;
   return s;
 }
@@ -535,11 +542,27 @@ EGLBoolean EglState::QuerySurface(EGLDisplay dpy, EGLSurface surface,
   }
   switch (attribute) {
     case kEglWidth:
-      *value = it->second.width;
+    case kEglHeight: {
+      // MC sizes its window from eglQuerySurface (and mirrors it through
+      // tglHostResizeMetalLayer); a stale 0x0 here propagates into the
+      // viewport. Log the pair on change so the EGL-visible size can be
+      // compared with the Metal drawable size in the same log.
+      static int size_logged = 0;
+      static EGLint lw = -1, lh = -1;
+      const EGLint w = it->second.width;
+      const EGLint h = it->second.height;
+      if (w != lw || h != lh) {
+        lw = w;
+        lh = h;
+        if (size_logged < 12) {
+          ++size_logged;
+          TglDebugf("diag eglsize#%d %dx%d attr=0x%x t=%lld", size_logged, w,
+                    h, attribute, TglNowMs());
+        }
+      }
+      *value = (attribute == kEglWidth) ? w : h;
       return kEglTrue;
-    case kEglHeight:
-      *value = it->second.height;
-      return kEglTrue;
+    }
     case kEglConfigId:
       *value = static_cast<EGLint>(it->second.config);
       return kEglTrue;
@@ -548,6 +571,18 @@ EGLBoolean EglState::QuerySurface(EGLDisplay dpy, EGLSurface surface,
   }
   errors_.Record(static_cast<GLenum>(kEglBadAttribute));
   return kEglFalse;
+}
+
+void EglState::SetWindowSurfaceSize(EGLint width, EGLint height) {
+  if (width <= 0 || height <= 0) return;
+  last_window_width_ = width;
+  last_window_height_ = height;
+  for (auto& kv : surfaces_) {
+    if (kv.second.alive && kv.second.is_window) {
+      kv.second.width = width;
+      kv.second.height = height;
+    }
+  }
 }
 
 EGLBoolean EglState::MakeCurrent(EGLDisplay dpy, EGLSurface draw,
@@ -701,6 +736,37 @@ EGLBoolean EglState::SwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   if (it->second.is_window) {
     // Real present happens in the iOS bridge; the host records the swap.
     ++it->second.swaps;
+    // Swap cadence: a frozen screen with a live render thread shows as
+    // draws continuing while these stop (or the reverse). Bounded so a long
+    // session cannot flood the 64KB diag ring.
+    const int sw_now = it->second.swaps;
+    if (sw_now <= 300 && (sw_now <= 5 || (sw_now % 10) == 0)) {
+      TglDebugf("diag swap#%d tid=%p t=%lld", sw_now, (void*)pthread_self(),
+                TglNowMs());
+    }
+    // Frame-gap timing: log slow frames (>=250ms) for the fps diagnosis.
+    // Bounded: first 96 slow frames only, so a slow session cannot flood
+    // the 64KB diag ring.
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last_swap;
+    static bool have_last = false;
+    static int slow_seen = 0;
+    const Clock::time_point now = Clock::now();
+    if (have_last) {
+      const long long ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                                last_swap)
+              .count();
+      if (ms >= 250) {
+        const int n = ++slow_seen;
+        if (n <= 96) {
+          TglDebugf("diag frame_gap#%d ms=%lld swap=%d t=%lld", n, ms,
+                    it->second.swaps, TglNowMs());
+        }
+      }
+    }
+    last_swap = now;
+    have_last = true;
   }
   return kEglTrue;  // Pbuffer/single-buffered: spec no-op, still success.
 }

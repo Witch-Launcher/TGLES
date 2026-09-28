@@ -402,7 +402,7 @@ TEST(AbiStatePath, FramebufferStatusViaAbi) {
   bind_tex(0x0DE1 /*TEXTURE_2D*/, t);
   storage(0x0DE1, 1, 0x8058 /*RGBA8*/, 16, 16);
   gen_fbo(1, &f);
-  bind_fbo(0x8CA9 /*FRAMEBUFFER*/, f);
+  bind_fbo(0x8D40 /*FRAMEBUFFER*/, f);
   attach(0x8CA9, 0x8CE0 /*COLOR_ATTACHMENT0*/, 0x0DE1, t, 0);
   // A complete color-only FBO reports COMPLETE (gap returns 0).
   EXPECT_EQ(status(0x8CA9), (GLenum)0x8CD5 /*FRAMEBUFFER_COMPLETE*/);
@@ -629,11 +629,11 @@ TEST(AbiStatePath, ClearMaskViaAbi) {
   EXPECT_EQ(get_error(), (GLenum)GL_INVALID_VALUE);
   // Isolate from prior tests sharing the process-wide HostRuntime singleton:
   // bind the default drawable explicitly before probing default-clear rules.
-  if (bindF) bindF(0x8CA9u /*FRAMEBUFFER*/, 0);
+  if (bindF) bindF(0x8D40u /*FRAMEBUFFER*/, 0);
   EXPECT_EQ(get_error(), (GLenum)GL_NO_ERROR);
   clear(0x00004000u /*COLOR_BUFFER_BIT*/);
-  // Default framebuffer has no CPU store: fail closed, never silent.
-  EXPECT_EQ(get_error(), (GLenum)GL_INVALID_OPERATION);
+  // Default framebuffer has no CPU store: glClear marks a pending window
+  // clear (facade applies it on the next device pass) — never an error.
   EXPECT_EQ(get_error(), (GLenum)GL_NO_ERROR);
 }
 

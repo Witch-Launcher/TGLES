@@ -40,7 +40,7 @@ bool PsoKey::operator==(const PsoKey& other) const {
          sample_count == other.sample_count &&
          textured == other.textured && translated == other.translated &&
          program_id == other.program_id && slot2 == other.slot2 &&
-         mrt_count == other.mrt_count;
+         slot3 == other.slot3 && mrt_count == other.mrt_count;
 }
 
 bool PsoKey::operator<(const PsoKey& other) const {
@@ -55,7 +55,7 @@ bool PsoKey::operator<(const PsoKey& other) const {
                   blend_enabled_per, color_write_mask_per, cull_enabled,
                   depth_enabled, rasterizer_discard, tessellation,
                   sample_count, textured, translated, program_id, slot2,
-                  mrt_count) <
+                  slot3, mrt_count) <
          std::tie(other.vertex_program, other.fragment_program,
                   other.blend_eq_rgb, other.blend_eq_alpha,
                   other.blend_src_rgb, other.blend_dst_rgb,
@@ -68,8 +68,9 @@ bool PsoKey::operator<(const PsoKey& other) const {
                   other.blend_enabled_per, other.color_write_mask_per,
                   other.cull_enabled, other.depth_enabled,
                   other.rasterizer_discard, other.tessellation,
-                  other.sample_count, other.textured, other.translated,
-                  other.program_id, other.slot2, other.mrt_count);
+                   other.sample_count, other.textured, other.translated,
+                   other.program_id, other.slot2, other.slot3,
+                   other.mrt_count);
 }
 
 PsoKey PsoKeyForDraw(Context& ctx, const RasterState& raster) {

@@ -53,6 +53,8 @@ struct Dylib {
   int (*AttachLayer)(void*, int, int) = nullptr;
   int (*HostPresent)(void) = nullptr;
   int (*ReadbackPixel)(int, int, unsigned char[4]) = nullptr;
+  void (*SetDebugLog)(int) = nullptr;
+  int (*GetDebugLog)(char*, int) = nullptr;
   void (*GenBuffers)(int, unsigned*) = nullptr;
   void (*BindBuffer)(unsigned, unsigned) = nullptr;
   void (*BufferData)(unsigned, long, const void*, unsigned) = nullptr;
@@ -105,6 +107,8 @@ bool LoadDylib(Dylib& d, std::string& missing) {
   REQ_DSYM(AttachLayer, tglHostAttachMetalLayer)
   REQ_DSYM(HostPresent, tglHostPresent)
   REQ_DSYM(ReadbackPixel, tglHostReadbackPixel)
+  REQ_DSYM(SetDebugLog, tglHostSetDebugLog)
+  REQ_DSYM(GetDebugLog, tglHostGetDebugLog)
 #undef REQ_DSYM
   // GLES strictly through eglGetProcAddress (MobileGL route).
 #define REQ_PROC(field, name)                                               \
@@ -152,7 +156,28 @@ TEST(DylibPresent, RedTriangleThroughBuiltLibrary) {
   // tglHost* must ALSO resolve via procaddr (single dispatch table rule).
   EXPECT_TRUE(d.GetProcAddress("tglHostPresent") != nullptr);
   EXPECT_TRUE(d.GetProcAddress("tglHostAttachMetalLayer") != nullptr);
+  EXPECT_TRUE(d.GetProcAddress("tglHostSetDebugLog") != nullptr);
+  EXPECT_TRUE(d.GetProcAddress("tglHostGetDebugLog") != nullptr);
   EXPECT_TRUE(d.GetProcAddress("glTotallyMadeUpName") == nullptr);
+  // Debug-log channel through the built library: drain leftovers first
+  // (earlier suites log fail-closed probes into the shared ring), then prove
+  // mode 0 records nothing.
+  d.SetDebugLog(3);
+  {
+    char drain[8192];
+    while (d.GetDebugLog(drain, sizeof(drain)) > 0) {
+    }
+  }
+  d.SetDebugLog(0);
+  {
+    char probe[64] = {0};
+    EXPECT_EQ(d.GetDebugLog(probe, sizeof(probe)), 0);
+  }
+  d.SetDebugLog(3);
+  EXPECT_TRUE(d.GetProcAddress("tglHostSetDebugLog") ==
+              dlsym(d.lib, "tglHostSetDebugLog"));
+  EXPECT_TRUE(d.GetProcAddress("tglHostGetDebugLog") ==
+              dlsym(d.lib, "tglHostGetDebugLog"));
 
   Hdpy dpy = d.GetDisplay(nullptr);
   EXPECT_TRUE(dpy != nullptr);

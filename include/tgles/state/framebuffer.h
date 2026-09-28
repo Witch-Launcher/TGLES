@@ -16,7 +16,11 @@ namespace tgles {
 // FBO targets.
 inline constexpr GLenum kGlReadFramebuffer = 0x8CA8;
 inline constexpr GLenum kGlDrawFramebuffer = 0x8CA9;
-inline constexpr GLenum kGlFramebuffer = 0x8CA9;
+// GL_FRAMEBUFFER (gl.xml, both bindings) — NOT 0x8CA9: aliasing it to
+// GL_DRAW_FRAMEBUFFER made every draw-bind also clobber the read binding,
+// so a READ-then-DRAW bind sequence (what an app does before glBlitFramebuffer
+// into the window) left the read FBO at 0.
+inline constexpr GLenum kGlFramebuffer = 0x8D40;
 inline constexpr GLenum kGlRenderbuffer = 0x8D41;
 
 // Attachments.
@@ -191,6 +195,28 @@ class FramebufferManager {
   // Draw-buffer list for the MRT path (the stored vector; defaults to
   // {COLOR_ATTACHMENT0} when DrawBuffers was never called).
   std::vector<GLenum> DrawBufferList(GLuint framebuffer) const;
+  // Window-system size for the default framebuffer (name 0). Set from the
+  // host present path (tglHostAttachMetalLayer / tglHostResizeMetalLayer)
+  // via EglState::SetWindowSurfaceSize → HostRuntime. Until set, FBO 0
+  // draws fail closed (size unknown) — same as the old Attachment() gap,
+  // but once set the default FB is drawable at the layer size.
+  void SetDefaultFramebufferSize(GLsizei width, GLsizei height);
+  void DefaultFramebufferSize(GLsizei* width, GLsizei* height) const;
+  // True when a glClear hit the default framebuffer (window) OR the
+  // framebuffer that is presented to the window (learned from a
+  // glBlitFramebuffer into FBO 0). The CPU model cannot fill window pixels;
+  // the facade consumes this before the next bridge pass so the pass clear
+  // (glClearColor state) applies on device.
+  bool ConsumeWindowClear();
+  void MarkWindowClear();
+  // Color captured by the last window (or window-source) clear. The facade
+  // uses it for the device-side pass clear instead of the live glClearColor
+  // state, which by then may have been overwritten by a clear of some other
+  // FBO (MC clears its GUI target after the main target every frame).
+  void GetWindowClearColor(GLfloat out[4]) const;
+  // FBO last blitted into the window (0 = none learned yet).
+  GLuint WindowSource() const { return window_source_; }
+  bool HasWindowSource() const { return window_source_ != 0; }
 
  private:
   struct Framebuffer {
@@ -219,6 +245,11 @@ class FramebufferManager {
   std::map<GLuint, Framebuffer> framebuffers_;
   GLuint bound_draw_ = 0;
   GLuint bound_read_ = 0;
+  GLsizei default_fb_width_ = 0;
+  GLsizei default_fb_height_ = 0;
+  bool window_clear_pending_ = false;
+  GLuint window_source_ = 0;
+  GLfloat window_clear_color_[4] = {0.f, 0.f, 0.f, 0.f};
 };
 
 }  // namespace tgles

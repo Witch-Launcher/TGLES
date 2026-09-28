@@ -132,6 +132,8 @@ TEST(BlendDepthReal, DepthAndBlendExecuteTogether) {
       tgles::kGlRenderbuffer, rb);
   ctx.foundation().Enable(tgles::kGlDepthTest);
   ctx.foundation().Enable(tgles::kGlBlend);
+  // Opaque black clear so blend math uses dst alpha=1 (GL default is 0).
+  ctx.raster().ClearColor(0.f, 0.f, 0.f, 1.f);
   ctx.raster().BlendFunc(tgles::kGlSrcAlpha, tgles::kGlOneMinusSrcAlpha);
   EXPECT_EQ(ctx.raster().GetError(), tgles::kGlNoError);
   // Old code refused this out loud; now it must execute with no error.

@@ -29,6 +29,10 @@ class Context {
   // Error handling (spec 2.3.1).
   GLenum GetError();
   bool HasPending() const;
+  // Facade-level INVALID_* with no more specific manager (e.g. a
+  // PIXEL_UNPACK_BUFFER range failure resolved before TextureManager runs).
+  // First-wins like every other queue (spec 2.3.1).
+  void RecordError(GLenum code);
 
   // Server strings (spec 20.2). Unknown names record INVALID_ENUM and
   // return nullptr.

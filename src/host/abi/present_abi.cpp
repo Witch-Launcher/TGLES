@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "tgles/base/debug_log.h"
+
 #include "tgles/host/host_runtime.h"
 
 #if defined(__APPLE__)
@@ -58,7 +60,15 @@ int tglHostAttachMetalLayer(void* ca_metal_layer, int width, int height) {
   }
   bridge->SetLayer(ca_metal_layer, static_cast<tgles::GLsizei>(width),
                    static_cast<tgles::GLsizei>(height));
-  return bridge->GetError() == tgles::kGlNoError ? 1 : 0;
+  if (bridge->GetError() != tgles::kGlNoError) return 0;
+  // Mirror the drawable size into EGL window surfaces so eglQuerySurface
+  // reports the real size instead of 0x0 (hosts probe this for readbacks).
+  tgles::HostRuntime::Instance().egl().SetWindowSurfaceSize(width, height);
+  // Also size the default FBO (name 0) so window draws are not fail-closed
+  // on Attachment() width=0 (the black-screen SubmitVertices gap).
+  tgles::HostRuntime::Instance().gl().framebuffers().SetDefaultFramebufferSize(
+      width, height);
+  return 1;
 #else
   (void)ca_metal_layer;
   (void)width;
@@ -73,7 +83,11 @@ int tglHostResizeMetalLayer(int width, int height) {
   if (bridge == nullptr || width <= 0 || height <= 0) return 0;
   bridge->Resize(static_cast<tgles::GLsizei>(width),
                  static_cast<tgles::GLsizei>(height));
-  return bridge->GetError() == tgles::kGlNoError ? 1 : 0;
+  if (bridge->GetError() != tgles::kGlNoError) return 0;
+  tgles::HostRuntime::Instance().egl().SetWindowSurfaceSize(width, height);
+  tgles::HostRuntime::Instance().gl().framebuffers().SetDefaultFramebufferSize(
+      width, height);
+  return 1;
 #else
   (void)width;
   (void)height;
@@ -89,8 +103,21 @@ int tglHostPresent(void) {
 #if defined(__APPLE__)
   auto& bridge = PresentBridge();
   if (bridge == nullptr) return 0;
-  if (!bridge->Present()) return 0;
-  return bridge->WaitForCompletion(bridge->FrameSerial()) ? 1 : 0;
+  // Multi-draw before swap: seal any open frame so Present shows this
+  // frame's draws (eglSwapBuffers does the same).
+  if (bridge->FrameOpen() && !bridge->CommitFrame()) {
+    (void)bridge->GetError();
+    return 0;
+  }
+  if (!bridge->Present()) {
+    (void)bridge->GetError();
+    return 0;
+  }
+  if (!bridge->WaitForCompletion(bridge->FrameSerial())) {
+    (void)bridge->GetError();
+    return 0;
+  }
+  return 1;
 #else
   return 0;
 #endif
@@ -125,6 +152,12 @@ unsigned long long tglHostFrameSerial(void) {
 #else
   return 0u;
 #endif
+}
+
+void tglHostSetDebugLog(int mode) { tgles::TglSetDebugLogMode(mode); }
+
+int tglHostGetDebugLog(char* out, int capacity) {
+  return tgles::TglDebugLogDrain(out, capacity);
 }
 
 }  // extern "C"

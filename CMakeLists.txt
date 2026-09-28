@@ -47,6 +47,7 @@ endif()
 add_library(tgles_core
   # base
   src/base/error.cpp
+  src/base/debug_log.cpp
   # state (GLES objects + server state)
   src/state/context.cpp
   src/state/buffer.cpp
@@ -163,6 +164,7 @@ if(APPLE)
     tests/gpu/test_sampler_kinds_real.mm
     tests/gpu/test_raster_exec_real.mm
     tests/gpu/test_phase4_real.mm
+    tests/gpu/test_window_source_clear_real.mm
     tests/host/test_dylib_present.mm)
 else()
   set(TGLES_APPLE_TEST_SOURCES "")
@@ -184,6 +186,7 @@ add_executable(tgles_tests
   tests/state/test_texture_formats.cpp
   tests/state/test_texture_upload.cpp
   tests/state/test_debug_filter.cpp
+  tests/base/test_debug_log.cpp
   tests/state/test_query_targets.cpp
   tests/state/test_shader_language.cpp
   tests/state/test_copy_image_3d.cpp
@@ -209,6 +212,7 @@ add_executable(tgles_tests
   # facade
   tests/facade/test_step10_facade_conformance.cpp
   tests/facade/test_multidraw_baseinstance.cpp
+  tests/facade/test_pbo_stale_validator.cpp
   # host: EGL layer, C ABI subset, and the upstream host contract
   tests/host/test_egl_layer.cpp
   tests/host/test_host_c_api.cpp

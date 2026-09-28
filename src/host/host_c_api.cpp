@@ -6,13 +6,25 @@
 #include "tgles/host/host_c_api.h"
 
 #include <cstring>
+#include <map>
+#include <string>
 #include <vector>
 
+#include "tgles/base/debug_log.h"
 #include "tgles/host/host_runtime.h"
 
 namespace {
 
 tgles::HostRuntime& Rt() { return tgles::HostRuntime::Instance(); }
+
+// First-N program-lifecycle diagnostics (black-screen: prog always 0).
+int DiagP(const char* tag) {
+  static int n_create = 0, n_link = 0, n_use = 0, n_compile = 0;
+  if (tag[0] == 'c' && tag[1] == 'r') return ++n_create;
+  if (tag[0] == 'l') return ++n_link;
+  if (tag[0] == 'u') return ++n_use;
+  return ++n_compile;
+}
 
 // TGL EGL handles are small integer ids; the C ABI carries them as void*.
 EGLDisplay ToDisplay(tgles::EGLDisplay id) {
@@ -122,11 +134,23 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   if (!Rt().egl().IsWindowSurface(FromSurface(surface))) return ok;
   tgles::metal_bridge::MetalBridge* bridge = Rt().Bridge();
   if (bridge == nullptr) return ok;
+  // Multi-draw before swap: seal any open frame so Present shows the
+  // draws from this frame (reopen-at-swap path; SubmitVertices may leave
+  // the frame open across several glDraw* calls).
+  if (bridge->FrameOpen() && !bridge->CommitFrame()) {
+    // Present/commit failures latch INVALID_OPERATION on the bridge; drain it
+    // so the next draw does not false-fail on a stale first-error-wins latch.
+    (void)bridge->GetError();
+    Rt().egl().RecordError(tgles::kEglBadAlloc);
+    return 0;
+  }
   if (!bridge->Present()) {
+    (void)bridge->GetError();
     Rt().egl().RecordError(tgles::kEglBadAlloc);
     return 0;
   }
   if (!bridge->WaitForCompletion(bridge->FrameSerial())) {
+    (void)bridge->GetError();
     Rt().egl().RecordError(tgles::kEglBadAlloc);
     return 0;
   }
@@ -167,7 +191,7 @@ void glGenVertexArrays(GLsizei n, GLuint* arrays) {
 
 void glBindVertexArray(GLuint array) {
   if (!HaveCurrent()) return;
-  Rt().gl().vertex_arrays().BindVertexArray(array);
+  Rt().gl().BindVertexArray(array);
 }
 
 void glEnableVertexAttribArray(GLuint index) {
@@ -201,6 +225,12 @@ void glShaderSource(GLuint shader, GLsizei count, const char* const* string,
 void glCompileShader(GLuint shader) {
   if (!HaveCurrent()) return;
   Rt().gl().shaders().CompileShader(shader);
+  const int n = DiagP("compile");
+  if (n <= 32) {
+    GLint ok = 0;
+    Rt().gl().shaders().GetShaderiv(shader, tgles::kGlCompileStatus, &ok);
+    tgles::TglDebugf("diag CompileShader#%d sh=%u ok=%d", n, shader, ok);
+  }
 }
 
 void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
@@ -209,8 +239,15 @@ void glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
 }
 
 GLuint glCreateProgram(void) {
-  if (!HaveCurrent()) return 0;
-  return Rt().gl().programs().CreateProgram();
+  if (!HaveCurrent()) {
+    const int n = DiagP("use");
+    if (n <= 8) tgles::TglDebugf("diag CreateProgram no_current#%d", n);
+    return 0;
+  }
+  const GLuint id = Rt().gl().programs().CreateProgram();
+  const int n = DiagP("create");
+  if (n <= 32) tgles::TglDebugf("diag CreateProgram#%d id=%u", n, id);
+  return id;
 }
 
 void glAttachShader(GLuint program, GLuint shader) {
@@ -219,8 +256,26 @@ void glAttachShader(GLuint program, GLuint shader) {
 }
 
 void glLinkProgram(GLuint program) {
-  if (!HaveCurrent()) return;
+  if (!HaveCurrent()) {
+    const int n = DiagP("use");
+    if (n <= 8) tgles::TglDebugf("diag LinkProgram no_current#%d prog=%u", n, program);
+    return;
+  }
   Rt().gl().programs().LinkProgram(program);
+  const int n = DiagP("link");
+  if (n <= 32) {
+    GLint ok = 0;
+    Rt().gl().programs().GetProgramiv(program, tgles::kGlLinkStatus, &ok);
+    if (ok) {
+      tgles::TglDebugf("diag LinkProgram#%d prog=%u ok=1", n, program);
+    } else {
+      const std::string log = Rt().gl().programs().GetProgramInfoLog(program);
+      GLint attached = 0;
+      Rt().gl().programs().GetProgramiv(program, tgles::kGlAttachedShaders, &attached);
+      tgles::TglDebugf("diag LinkProgram#%d prog=%u ok=0 attached=%d log=%.240s", n,
+                       program, attached, log.c_str());
+    }
+  }
 }
 
 void glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
@@ -229,7 +284,24 @@ void glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
 }
 
 void glUseProgram(GLuint program) {
-  if (!HaveCurrent()) return;
+  if (!HaveCurrent()) {
+    const int n = DiagP("use");
+    if (n <= 8) tgles::TglDebugf("diag UseProgram no_current#%d prog=%u", n, program);
+    return;
+  }
+  const int n = DiagP("use");
+  if (n <= 48) {
+    tgles::TglDebugf("diag UseProgram#%d prog=%u cur_before=%u", n, program,
+              Rt().gl().programs().CurrentProgram());
+  }
+  // Uncapped: first use of each program, forever (bounded by program count).
+  {
+    static std::map<GLuint, bool> first_use_logged;
+    if (!first_use_logged[program]) {
+      first_use_logged[program] = true;
+      tgles::TglDebugf("diag first_use prog=%u use_count=%d", program, n);
+    }
+  }
   Rt().gl().programs().UseProgram(program);
 }
 
@@ -258,8 +330,12 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
                   GLsizei width, GLsizei height, GLint border, GLenum format,
                   GLenum type, const void* pixels) {
   if (!HaveCurrent()) return;
+  const void* src = nullptr;
+  if (!Rt().gl().ResolveTexelSource(pixels, width, height, 1, format, type,
+                                    &src))
+    return;
   Rt().gl().textures().TexImage2D(target, level, internalformat, width,
-                                  height, border, format, type, pixels);
+                                  height, border, format, type, src);
 }
 
 void glGenFramebuffers(GLsizei n, GLuint* framebuffers) {
@@ -282,6 +358,22 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment,
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
   if (!HaveCurrent()) return;
   Rt().gl().raster().Viewport(x, y, width, height);
+  // 0x0 (observed for the first ~70 frames of a session) turns every window
+  // draw into a no-op while the clear still shows: log the value, on change,
+  // so a screenshot can be matched against the viewport that produced it.
+  static int vp_logged = 0;
+  static GLint lx = 1, ly = 1, lw = 1, lh = 1;
+  if (x != lx || y != ly || width != lw || height != lh) {
+    lx = x;
+    ly = y;
+    lw = width;
+    lh = height;
+    if (vp_logged < 32) {
+      ++vp_logged;
+      tgles::TglDebugf("diag viewport#%d x=%d y=%d w=%d h=%d", vp_logged, x,
+                       y, width, height);
+    }
+  }
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {

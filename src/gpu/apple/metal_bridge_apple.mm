@@ -25,7 +25,10 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <pthread.h>
+#include <set>
 
+#include "tgles/base/debug_log.h"
 #include "tgles/gpu/metal_bridge_apple.h"
 #include "tgles/gpu/metal_mapping.h"
 #include "tgles/gpu/metal_translate.h"
@@ -162,6 +165,9 @@ class AppleMetalBridge : public MetalBridge {
         bound_needs_texture_ = (sit != handle_uses_sampler_.end())
                                    ? sit->second
                                    : kv.second.key.textured;
+        auto vsit = handle_uses_vertex_sampler_.find(handle);
+        bound_needs_vertex_texture_ =
+            (vsit != handle_uses_vertex_sampler_.end()) ? vsit->second : false;
         bound_mrt_count_ = kv.second.key.mrt_count;
         bound_samples_ = kv.second.key.sample_count;
         return;
@@ -179,6 +185,7 @@ class AppleMetalBridge : public MetalBridge {
         bound_needs_texture_ = (sit != stencil_key_sampler_.end())
                                    ? sit->second
                                    : bound_textured_;
+        bound_needs_vertex_texture_ = false;
         bound_mrt_count_ = bk.mrt_count;
         bound_samples_ = bk.sample_count;
         return;
@@ -254,6 +261,19 @@ class AppleMetalBridge : public MetalBridge {
                                                : kGlInvalidOperation);
       return false;
     }
+    // Multi-draw before Present: a committed frame at the SAME size reopens
+    // without a new command buffer or target realloc so later draws append
+    // (Load, not Clear). Size/MRT mismatch stays fail-closed (the facade
+    // must CommitFrame / start a fresh frame when the FBO size changes).
+    if (committed_ && cmd_ != nil && target_width_ == width &&
+        target_height_ == height &&
+        (GLsizei)mrt_targets_.size() ==
+            ((bound_pso_ != nil) ? bound_mrt_count_ : mrt_count_)) {
+      committed_ = false;
+      frame_open_ = true;
+      render_open_ = false;
+      return true;
+    }
     // The bridge owns RGBA8 Shared offscreen targets per frame size, one
     // per MRT attachment (count from the bound key, explicit SetMrtCount
     // fallback for bare-bridge use). Attachment 0 aliases target_ so all
@@ -311,8 +331,7 @@ class AppleMetalBridge : public MetalBridge {
           id<MTLTexture> mt = [device_ newTextureWithDescriptor:md];
           if (mt == nil) {
             errors_.Record(kGlInvalidOperation);
-            fprintf(stderr,
-                    "[TGL-DEBUG] MRT+MSAA: msaa target %d alloc failed\n", i);
+            TglDebugf("MRT+MSAA: msaa target %d alloc failed", i);
             return false;
           }
           msaa_targets_.push_back(mt);
@@ -438,6 +457,23 @@ class AppleMetalBridge : public MetalBridge {
     return true;
   }
 
+  bool FrameOpen() const override { return frame_open_; }
+  GLsizei TargetWidth() const override { return target_width_; }
+  GLsizei TargetHeight() const override { return target_height_; }
+  void SetClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) override {
+    clear_color_[0] = r;
+    clear_color_[1] = g;
+    clear_color_[2] = b;
+    clear_color_[3] = a;
+  }
+  // What the next BeginRenderPass clears (see metal_bridge.h): default
+  // color+depth; the facade clears COLOR off for its frame-start depth-only
+  // reset so the app's background color survives the pass.
+  void SetClearAttachments(bool color, bool depth) override {
+    clear_color_flag_ = color;
+    clear_depth_flag_ = depth;
+  }
+
   void BeginRenderPass() override {
     if (!frame_open_ || render_open_ || committed_ || cmd_ == nil ||
         target_ == nil) {
@@ -460,6 +496,9 @@ class AppleMetalBridge : public MetalBridge {
     // MRT: attachments 0..N-1 from the sized targets (N from the bound key).
     // MSAA: EACH attachment renders into its own multisample texture and
     // resolves into its target (Phase 4 item 4 per-attachment resolve).
+    // Clear: first pass of the frame clears with glClearColor (SetClearColor);
+    // later passes in the same multi-draw frame must Load (facade uses
+    // BeginRenderPassNoClear for those — this entry always Clears).
     const bool use_msaa = (!msaa_targets_.empty());
     const GLsizei pass_n =
         (bound_mrt_count_ > 1) ? bound_mrt_count_ : 1;
@@ -471,8 +510,10 @@ class AppleMetalBridge : public MetalBridge {
           resolve_this ? msaa_targets_[i] : nil;
       rp.colorAttachments[i].texture =
           resolve_this ? msaa_tex : mrt_targets_[i];
-      rp.colorAttachments[i].loadAction = MTLLoadActionClear;
-      rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 1);
+      rp.colorAttachments[i].loadAction =
+          clear_color_flag_ ? MTLLoadActionClear : MTLLoadActionLoad;
+      rp.colorAttachments[i].clearColor = MTLClearColorMake(
+          clear_color_[0], clear_color_[1], clear_color_[2], clear_color_[3]);
       if (resolve_this) {
         rp.colorAttachments[i].resolveTexture = mrt_targets_[i];
         rp.colorAttachments[i].storeAction =
@@ -495,11 +536,17 @@ class AppleMetalBridge : public MetalBridge {
         if (msaa_d != nil) depth_tex = msaa_d;
       }
       rp.depthAttachment.texture = depth_tex;
-      rp.depthAttachment.loadAction = MTLLoadActionClear;
+      rp.depthAttachment.loadAction =
+          clear_depth_flag_ ? MTLLoadActionClear : MTLLoadActionLoad;
       double cd = (double)depth_cfg_.clear_depth;
       if (!(cd >= 0.0 && cd <= 1.0)) cd = (cd < 0.0) ? 0.0 : 1.0;
       rp.depthAttachment.clearDepth = cd;
-      rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+      // Store, never DontCare: later passes in this frame (and the next
+      // frame, before its own clear) Load this attachment. DontCare lets
+      // Metal discard the cleared depth, after which every depth-tested draw
+      // fails against undefined values and the screen shows the clear color
+      // only.
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
     }
     if (want_stencil) {
       // Stencil clears at pass start like depth (same one-draw-per-frame
@@ -508,12 +555,13 @@ class AppleMetalBridge : public MetalBridge {
       id<MTLTexture> sten_tex = ds_tex;
       if (use_msaa && msaa_ds_ != nil) sten_tex = msaa_ds_;
       rp.stencilAttachment.texture = sten_tex;
-      rp.stencilAttachment.loadAction = MTLLoadActionClear;
+      rp.stencilAttachment.loadAction =
+          clear_depth_flag_ ? MTLLoadActionClear : MTLLoadActionLoad;
       rp.stencilAttachment.clearStencil = (std::uint32_t)(
           stencil_cfg_.clear_stencil < 0 ? 0
           : stencil_cfg_.clear_stencil > 255 ? 255
                                               : stencil_cfg_.clear_stencil);
-      rp.stencilAttachment.storeAction = MTLStoreActionDontCare;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
     }
     if (want_depth || want_stencil) {
       dss = EnsureDepthStencilState();
@@ -679,6 +727,9 @@ class AppleMetalBridge : public MetalBridge {
     }
     frag_smps_[unit] = smp;
     active_frag_unit_ = unit;
+    // Cross-invalidation: this simple sampler is NOT the Detail-built one —
+    // force the next SetFragmentSamplerDetail/SetSamplerLod to rebuild.
+    sampler_gl_[unit].smp_valid = false;
   }
 
   bool HasFragmentTexture(GLuint unit) const override {
@@ -893,7 +944,7 @@ class AppleMetalBridge : public MetalBridge {
     id<MTLTexture> tex = [device_ newTextureWithDescriptor:td];
     if (tex == nil) {
       errors_.Record(kGlInvalidOperation);
-      fprintf(stderr, "[TGL-DEBUG] cube-mips alloc failed size %d levels %d\n",
+      TglDebugf("cube-mips alloc failed size %d levels %d\n",
               (int)base_size, levels);
       return;
     }
@@ -945,7 +996,7 @@ class AppleMetalBridge : public MetalBridge {
     id<MTLTexture> tex = [device_ newTextureWithDescriptor:td];
     if (tex == nil) {
       errors_.Record(kGlInvalidOperation);
-      fprintf(stderr, "[TGL-DEBUG] 3D-mips alloc failed\n");
+      TglDebugf("3D-mips alloc failed\n");
       return;
     }
     for (int l = 0; l < levels; ++l) {
@@ -997,7 +1048,7 @@ class AppleMetalBridge : public MetalBridge {
     id<MTLTexture> tex = [device_ newTextureWithDescriptor:td];
     if (tex == nil) {
       errors_.Record(kGlInvalidOperation);
-      fprintf(stderr, "[TGL-DEBUG] array-mips alloc failed\n");
+      TglDebugf("array-mips alloc failed\n");
       return;
     }
     for (int l = 0; l < levels; ++l) {
@@ -1100,12 +1151,17 @@ class AppleMetalBridge : public MetalBridge {
     id<MTLSamplerState> smp = [device_ newSamplerStateWithDescriptor:sd];
     if (smp == nil) {
       errors_.Record(kGlInvalidOperation);
-      fprintf(stderr, "[TGL-DEBUG] sampler lod %.2f/%.2f rejected\n",
+      TglDebugf("sampler lod %.2f/%.2f rejected\n",
               g.min_lod, g.max_lod);
       return;
     }
     frag_smps_[unit] = smp;
     active_frag_unit_ = unit;
+    // Arm the rebuild guard: record what this sampler was built from so the
+    // per-draw Detail/Lod calls can skip re-creating it while params match.
+    SamplerGL& rec = sampler_gl_[unit];
+    rec.built_token = SamplerToken(rec);
+    rec.smp_valid = true;
   }
 
   void SetFragmentSamplerDetail(GLuint unit, GLenum min_filter,
@@ -1147,6 +1203,13 @@ class AppleMetalBridge : public MetalBridge {
       g.max_lod = keep_max;
     }
     g.has_detail = true;
+    if (SamplerUpToDate(unit, g)) {
+      // Params unchanged since the last build: keep the MTLSamplerState
+      // (rebuilding it every textured draw was an fps killer). The unit is
+      // already bound — still arm Draw's fallback selector.
+      active_frag_unit_ = unit;
+      return;
+    }
     BuildSamplerForUnit(unit);
   }
 
@@ -1162,7 +1225,13 @@ class AppleMetalBridge : public MetalBridge {
     SamplerGL& g = sampler_gl_[unit];
     g.min_lod = min_lod;
     g.max_lod = max_lod;
-    if (g.has_detail) BuildSamplerForUnit(unit);
+    if (g.has_detail) {
+      if (SamplerUpToDate(unit, g)) {
+        active_frag_unit_ = unit;  // lod unchanged: keep the built sampler
+        return;
+      }
+      BuildSamplerForUnit(unit);
+    }
   }
 
   void SetSamplerSlots(const GLuint* gl_units, std::size_t count) override {
@@ -1175,6 +1244,19 @@ class AppleMetalBridge : public MetalBridge {
       return;
     }
     sampler_slots_.assign(gl_units, gl_units + count);
+  }
+
+  void SetVertexSamplerSlots(const GLuint* gl_units,
+                             std::size_t count) override {
+    if (!initialized_) {
+      errors_.Record(kGlInvalidOperation);
+      return;
+    }
+    if (gl_units == nullptr && count != 0) {
+      errors_.Record(kGlInvalidValue);
+      return;
+    }
+    vertex_sampler_slots_.assign(gl_units, gl_units + count);
   }
 
   void SetMrtCount(GLsizei n) override {
@@ -1266,14 +1348,16 @@ class AppleMetalBridge : public MetalBridge {
       }
       rp.depthAttachment.texture = depth_tex;
       rp.depthAttachment.loadAction = MTLLoadActionLoad;
-      rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+      // Store, never DontCare: a later pass in this same frame Loads what
+      // this one wrote (see BeginRenderPass).
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
     }
     if (want_stencil) {
       id<MTLTexture> sten_tex = ds_tex;
       if (use_msaa && msaa_ds_ != nil) sten_tex = msaa_ds_;
       rp.stencilAttachment.texture = sten_tex;
       rp.stencilAttachment.loadAction = MTLLoadActionLoad;
-      rp.stencilAttachment.storeAction = MTLStoreActionDontCare;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
     }
     if (want_depth || want_stencil) {
       dss = EnsureDepthStencilState();
@@ -1589,7 +1673,8 @@ class AppleMetalBridge : public MetalBridge {
                   (unsigned)cfg.dppass_back,
                   (unsigned)key.sample_count, (unsigned)key.textured,
                   (unsigned)key.translated, (unsigned)key.program_id,
-                  (unsigned)key.slot2, (unsigned)key.mrt_count);
+                  (unsigned)key.slot2, (unsigned)key.slot3,
+                  (unsigned)key.mrt_count);
     std::string s(buf, n > 0 ? static_cast<std::size_t>(n) : 0);
     for (int i = 0; i < 8; ++i) {
       char pb[128];
@@ -1749,6 +1834,7 @@ class AppleMetalBridge : public MetalBridge {
     vd.attributes[1].format = MTLVertexFormatFloat4;
     vd.attributes[1].offset = 16;
     vd.attributes[1].bufferIndex = 1;
+    const std::uint32_t base = 32u + key.slot2 * 4u;
     if (key.slot2 == 0) {
       vd.layouts[1].stride = 32;
     } else {
@@ -1759,7 +1845,18 @@ class AppleMetalBridge : public MetalBridge {
                                                    : MTLVertexFormatFloat2;
       vd.attributes[2].offset = 32;
       vd.attributes[2].bufferIndex = 1;
-      vd.layouts[1].stride = 32 + key.slot2 * 4;
+      vd.layouts[1].stride = base;
+    }
+    if (key.slot3 > 0) {
+      // Slot 3 (UV2/lightmap): float2/float after int-attr conversion.
+      // Gap attributes are legal — only offsets/stride must match the
+      // facade interleave (32 + 4*slot2 + 4*slot3).
+      vd.attributes[3].format = (key.slot3 >= 4)   ? MTLVertexFormatFloat4
+                                : (key.slot3 == 3) ? MTLVertexFormatFloat3
+                                                   : MTLVertexFormatFloat2;
+      vd.attributes[3].offset = base;
+      vd.attributes[3].bufferIndex = 1;
+      vd.layouts[1].stride = base + key.slot3 * 4u;
     }
     return vd;
   }
@@ -1795,7 +1892,7 @@ class AppleMetalBridge : public MetalBridge {
       const std::uint32_t handle = next_handle_++;
       stencil_pipelines_[sig] = Entry{handle, pso, key};
       stencil_key_textured_[sig] = key.textured;
-      stencil_key_sampler_[sig] = prog.uses_sampler;
+      stencil_key_sampler_[sig] = prog.uses_fragment_sampler;
       stencil_keys_[sig] = key;
       return handle;
     }
@@ -1805,7 +1902,8 @@ class AppleMetalBridge : public MetalBridge {
     if (pso == nil) return 0;  // Error already recorded.
     const std::uint32_t handle = next_handle_++;
     pipelines_[key] = Entry{handle, pso, key};
-    handle_uses_sampler_[handle] = prog.uses_sampler;
+    handle_uses_sampler_[handle] = prog.uses_fragment_sampler;
+    handle_uses_vertex_sampler_[handle] = prog.uses_vertex_sampler;
     return handle;
   }
 
@@ -1833,17 +1931,13 @@ class AppleMetalBridge : public MetalBridge {
           metal_translate::BlendFactor(key.blend_dst_alpha_per[u]);
       if (rop < 0 || aop < 0 || srgb < 0 || drgb < 0 || salpha < 0 ||
           dalpha < 0) {
-        fprintf(stderr,
-                "[TGL-DEBUG] translated per-buffer blend %d untranslatable\n",
-                i);
+        TglDebugf("translated per-buffer blend %d untranslatable", i);
         errors_.Record(kGlInvalidOperation);
         return nil;
       }
       if ((srgb >= 15 || drgb >= 15 || salpha >= 15 || dalpha >= 15) &&
           !prog.is_dual_source) {
-        fprintf(stderr,
-                "[TGL-DEBUG] translated dual-source factor on single-out %d\n",
-                i);
+        TglDebugf("translated dual-source factor on single-out %d", i);
         errors_.Record(kGlInvalidOperation);
         return nil;
       }
@@ -1859,7 +1953,7 @@ class AppleMetalBridge : public MetalBridge {
       lib = [device_ newLibraryWithSource:src options:nil error:&err];
       if (lib == nil) {
         if (err != nil) {
-          fprintf(stderr, "[TGL-DEBUG] translated MSL rejected: %s\nSRC:\n%s\n",
+          TglDebugf("translated MSL rejected: %s\nSRC:\n%s\n",
                   [[err localizedDescription] UTF8String],
                   prog.library_source.c_str());
         }
@@ -1915,7 +2009,7 @@ class AppleMetalBridge : public MetalBridge {
         [device_ newRenderPipelineStateWithDescriptor:desc error:&err];
     if (pso == nil) {
       if (err != nil) {
-        fprintf(stderr, "[TGL-DEBUG] translated PSO rejected: %s\n",
+        TglDebugf("translated PSO rejected: %s\n",
                 [[err localizedDescription] UTF8String]);
       }
       errors_.Record(kGlInvalidOperation);
@@ -2199,6 +2293,38 @@ class AppleMetalBridge : public MetalBridge {
         ++slot_idx;
       }
     }
+    // Vertex texture fetch (sample_lightmap / VTF): independent Metal index
+    // space; slot map from SetVertexSamplerSlots. Shared frag_texs_/frag_smps_
+    // store the uploaded units (GL unit id keys).
+    if (bound_needs_vertex_texture_ && !vertex_sampler_slots_.empty()) {
+      NSUInteger vslot = 0;
+      for (std::uint32_t unit : vertex_sampler_slots_) {
+        auto tit = frag_texs_.find(unit);
+        if (tit == frag_texs_.end() || tit->second == nil) {
+          errors_.Record(kGlInvalidOperation);
+          return;
+        }
+        id<MTLSamplerState> vsmp = nil;
+        auto sit = frag_smps_.find(unit);
+        if (sit != frag_smps_.end()) vsmp = sit->second;
+        if (vsmp == nil) {
+          MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+          sd.minFilter = MTLSamplerMinMagFilterNearest;
+          sd.magFilter = MTLSamplerMinMagFilterNearest;
+          sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+          sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+          sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+          vsmp = [device_ newSamplerStateWithDescriptor:sd];
+          if (vsmp == nil) {
+            errors_.Record(kGlInvalidOperation);
+            return;
+          }
+        }
+        [encoder_ setVertexTexture:tit->second atIndex:vslot];
+        [encoder_ setVertexSamplerState:vsmp atIndex:vslot];
+        ++vslot;
+      }
+    }
     for (const auto& kv : ubo_bytes_) {
       // UBO blocks ride constant buffers 2+i (translator emits matching
       // indices); needed by both stages, like the uniform block.
@@ -2270,6 +2396,137 @@ class AppleMetalBridge : public MetalBridge {
   bool Committed() const override { return committed_; }
   GLuint DrawCount() const override { return draws_; }
 
+  // Debug histogram of the committed target: the glue's 15 point probes
+  // miss the logo/bar, so a per-frame sample answers "did ANY draw paint"
+  // from the device log alone. Reads 16 full rows after waiting for the
+  // last committed frame; only runs with the debug channel on, for the
+  // first 6 swaps and every 60th after that.
+  // Live Metal texture footprint, split by owner. Jetsam kills this build at
+  // exactly 2 GiB while the process "looks" ~1 GB resident, so the device log
+  // needs the translator's own GPU-side bytes on the same cadence as the
+  // histogram: if the fragment-texture cache (the bridge re-uploads a fresh
+  // MTLTexture per SetFragmentTexture) or the render targets dominate, that
+  // is a fixable leak, unlike MC's JVM heap.
+  struct GpuMemStats {
+    std::size_t frag = 0;    // frag_texs_ (sampled per draw)
+    std::size_t own = 0;     // textures_ (handle table)
+    std::size_t target = 0;  // window/depth render targets
+    std::size_t count = 0;
+  };
+
+  static std::size_t TexBytes(id<MTLTexture> t) {
+    if (t == nil) return 0;
+    return static_cast<std::size_t>([t width]) *
+           static_cast<std::size_t>([t height]) * 4u;
+  }
+
+  GpuMemStats GpuMem() const {
+    GpuMemStats s;
+    std::set<const void*> seen;
+    auto add = [&](id<MTLTexture> t, std::size_t* bucket) {
+      if (t == nil) return;
+      if (!seen.insert((__bridge const void*)t).second) return;
+      *bucket += TexBytes(t);
+      ++s.count;
+    };
+    add(target_, &s.target);
+    add(depth_target_, &s.target);
+    for (const auto& [unit, t] : frag_texs_) add(t, &s.frag);
+    for (const auto& [handle, t] : textures_) add(t, &s.own);
+    return s;
+  }
+
+  void LogFrameHistogram() {
+    if (TglDebugLogMode() == 0 || target_ == nil || target_width_ <= 0 ||
+        target_height_ <= 0 || frame_serial_ == 0) {
+      return;
+    }
+    const std::uint64_t sw = swaps_;
+    if (!(sw <= 16 || (sw <= 300 && (sw % 10) == 0))) return;
+    WaitForCompletion(frame_serial_);
+    const NSUInteger w = (NSUInteger)target_width_;
+    const NSUInteger h = (NSUInteger)target_height_;
+    std::vector<std::uint8_t> row((std::size_t)w * 4, 0);
+    // 16 evenly spaced rows missed thin content (logo/progress bar): scan
+    // every 8th row instead so a drawn-but-small element cannot hide.
+    const NSUInteger row_step = h >= 64 ? 8 : 1;
+    if (row_step < 1 || h < 1) return;
+    std::size_t samples = 0;
+    std::size_t nz = 0;
+    NSUInteger fx = 0;
+    NSUInteger fy = 0;
+    int fr = -1, fg = -1, fb = -1, fa = -1;
+    // "diff" answers the only question that matters when the screen shows a
+    // solid background: is ANYTHING else on screen? nz cannot tell (a solid
+    // background is nonzero everywhere), so count samples that differ from
+    // the first one. diff=0 -> the frame is a uniform slab: whatever the app
+    // drew produced no visible pixel.
+    int bg[4] = {-1, -1, -1, -1};
+    std::size_t diff = 0;
+    // Where the differing samples sit (top-left origin, target pixels) plus
+    // the first differing color: diff=6110 alone cannot say whether the
+    // screen is showing a progress bar, a logo, or a smear across the middle.
+    NSUInteger dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
+    bool have_diff_box = false;
+    int dr = -1, dg = -1, db = -1, da = -1;
+    for (NSUInteger y = 0; y < h; y += row_step) {
+      [target_ getBytes:row.data()
+            bytesPerRow:(NSUInteger)(w * 4)
+             fromRegion:MTLRegionMake2D(0, y, w, 1)
+            mipmapLevel:0];
+      for (NSUInteger x = 0; x < w; ++x) {
+        const std::uint8_t* p = row.data() + (std::size_t)x * 4;
+        ++samples;
+        if (bg[0] < 0) {
+          bg[0] = p[2];  // RGB(A) of the first sample (BGRA storage).
+          bg[1] = p[1];
+          bg[2] = p[0];
+          bg[3] = p[3];
+        } else if (p[0] != static_cast<std::uint8_t>(bg[2]) ||
+                   p[1] != static_cast<std::uint8_t>(bg[1]) ||
+                   p[2] != static_cast<std::uint8_t>(bg[0]) ||
+                   p[3] != static_cast<std::uint8_t>(bg[3])) {
+          if (!have_diff_box) {
+            dx0 = dx1 = x;
+            dy0 = dy1 = y;
+            have_diff_box = true;
+            db = p[0];  // BGRA storage.
+            dg = p[1];
+            dr = p[2];
+            da = p[3];
+          } else {
+            if (x < dx0) dx0 = x;
+            if (x > dx1) dx1 = x;
+            if (y < dy0) dy0 = y;
+            if (y > dy1) dy1 = y;
+          }
+          ++diff;
+        }
+        if (p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 0) continue;
+        ++nz;
+        if (nz == 1) {
+          fx = x;
+          fy = y;
+          fb = p[0];  // BGRA storage.
+          fg = p[1];
+          fr = p[2];
+          fa = p[3];
+        }
+      }
+    }
+    const GpuMemStats gm = GpuMem();
+    TglDebugf(
+        "hist sw=%llu step=%llu samples=%zu nz=%zu diff=%zu bg=(%d,%d,%d,%d) "
+        "diffbox=[%llu,%llu]-[%llu,%llu] diffc=(%d,%d,%d,%d) "
+        "firstnz@%llu,%llu=(%d,%d,%d,%d) mem=f%zu/o%zu/t%zukB n=%zu t=%lld",
+        (unsigned long long)sw, (unsigned long long)row_step, samples, nz, diff,
+        bg[0], bg[1], bg[2], bg[3], (unsigned long long)dx0,
+        (unsigned long long)dy0, (unsigned long long)dx1,
+        (unsigned long long)dy1, dr, dg, db, da, (unsigned long long)fx,
+        (unsigned long long)fy, fr, fg, fb, fa, gm.frag / 1024u,
+        gm.own / 1024u, gm.target / 1024u, gm.count, TglNowMs());
+  }
+
   bool ReadbackPixel(GLint x, GLint y,
                      std::uint8_t out_rgba[4]) override {
     if (out_rgba == nullptr) {
@@ -2298,6 +2555,34 @@ class AppleMetalBridge : public MetalBridge {
     return true;
   }
 
+  bool TextureProbe(GLuint unit, GLint x, GLint y,
+                    std::uint8_t out_rgba[4]) override {
+    if (out_rgba == nullptr) {
+      errors_.Record(kGlInvalidValue);
+      return false;
+    }
+    auto it = frag_texs_.find(unit);
+    if (it == frag_texs_.end() || it->second == nil) {
+      errors_.Record(kGlInvalidOperation);
+      return false;
+    }
+    id<MTLTexture> tex = it->second;
+    if (x < 0 || y < 0 || (NSUInteger)x >= tex.width ||
+        (NSUInteger)y >= tex.height) {
+      errors_.Record(kGlInvalidValue);
+      return false;
+    }
+    std::uint8_t bgra[4] = {0, 0, 0, 0};
+    [tex getBytes:bgra
+      bytesPerRow:4
+       fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, 1, 1)
+      mipmapLevel:0];
+    out_rgba[0] = bgra[2];
+    out_rgba[1] = bgra[1];
+    out_rgba[2] = bgra[0];
+    out_rgba[3] = bgra[3];
+    return true;
+  }
   bool BlitToCpu(void* dst, std::size_t bytes) override {
     if (dst == nullptr) {
       errors_.Record(kGlInvalidValue);
@@ -2399,13 +2684,35 @@ class AppleMetalBridge : public MetalBridge {
 #endif
   }
 
+  // Capped: a persistently failing present must not flood the 64KB ring,
+  // but the FIRST failures (the interesting ones) always get recorded.
+  void LogPresentFail(const char* stage) {
+    static int fails = 0;
+    if (fails >= 16) return;
+    ++fails;
+    TglDebugf("present fail#%d stage=%s swaps=%llu tid=%p", fails, stage,
+              (unsigned long long)swaps_, (void*)pthread_self());
+  }
+
   bool Present() override {
     if (layer_ == nullptr || layer_width_ <= 0 || layer_height_ <= 0) {
       errors_.Record(kGlInvalidOperation);
+      LogPresentFail("layer");
       return false;
+    }
+    LogFrameHistogram();
+    // Multi-draw: SubmitVertices may leave the frame open; seal it so
+    // Present still shows this frame's draws (eglSwapBuffers / direct
+    // PresentAndWait helpers both rely on this).
+    if (frame_open_ && !render_open_ && cmd_ != nil && !committed_) {
+      if (!CommitFrame()) {
+        LogPresentFail("commit");
+        return false;
+      }
     }
     if (!committed_ || cmd_ == nil) {
       errors_.Record(kGlInvalidOperation);
+      LogPresentFail("nocmd");
       return false;
     }
 #if TGLES_HAS_QUARTZ
@@ -2413,6 +2720,7 @@ class AppleMetalBridge : public MetalBridge {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (drawable == nil) {
       errors_.Record(kGlInvalidOperation);
+      LogPresentFail("drawable");
       return false;
     }
     // Copy the offscreen render target into the drawable so a real window
@@ -2449,6 +2757,14 @@ class AppleMetalBridge : public MetalBridge {
     [cmd_ commit];
     ++frame_serial_;
     ++swaps_;
+    // Present cadence: pairs with "diag swap#" (host eglSwapBuffers) so a
+    // frozen screen splits into "host never swaps" vs "presents flow but
+    // content is stale". Bounded like the other cadence lines.
+    if (swaps_ <= 300 && (swaps_ <= 5 || (swaps_ % 10) == 0)) {
+      TglDebugf("present#%llu tid=%p layer=%p tgt=%ux%u t=%lld",
+                (unsigned long long)swaps_, (void*)pthread_self(), layer_,
+                target_width_, target_height_, TglNowMs());
+    }
     // completed_serial_ advances only in WaitForCompletion (async ring, like
     // MobileGL polling prior fences AFTER the swap).
     inflight_[frame_serial_] = cmd_;
@@ -2512,6 +2828,9 @@ class AppleMetalBridge : public MetalBridge {
   bool render_open_ = false;
   bool committed_ = false;
   GLuint draws_ = 0;
+  GLfloat clear_color_[4] = {0.f, 0.f, 0.f, 1.f};
+  bool clear_color_flag_ = true;
+  bool clear_depth_flag_ = true;
   std::vector<std::uint8_t> vertex_bytes_;
   std::uint32_t vertex_stride_ = 32;
   float mvp_[16];
@@ -2520,6 +2839,7 @@ class AppleMetalBridge : public MetalBridge {
   // sampler, bound to Metal texture(0)/sampler(0) when bound_textured_.
   bool bound_textured_ = false;
   bool bound_needs_texture_ = false;
+  bool bound_needs_vertex_texture_ = false;
   GLsizei bound_mrt_count_ = 1;
   GLsizei bound_samples_ = 0;
   std::map<std::uint32_t, id<MTLTexture>> frag_texs_;
@@ -2533,14 +2853,51 @@ class AppleMetalBridge : public MetalBridge {
     float min_lod = -1000.0f;
     float max_lod = 1000.0f;
     bool has_detail = false;
+    // MTLSamplerState rebuild guard: token of the params the current
+    // frag_smps_ entry was built from. SetFragmentSampler (legacy) clears
+    // smp_valid so the next Detail/Lod rebuild over its simple sampler.
+    std::uint64_t built_token = 0;
+    bool smp_valid = false;
   };
+
+  // FNV-1a over every param BuildSamplerForUnit reads. Matching token +
+  // smp_valid + an existing frag_smps_ entry = the built sampler is already
+  // correct; skip the per-draw MTLSamplerState create (a confirmed fps
+  // killer: this ran for every textured draw).
+  static std::uint64_t SamplerToken(const SamplerGL& g) {
+    std::uint64_t h = 14695981039346656037ull;
+    auto mix = [&h](std::uint64_t v) {
+      h ^= v;
+      h *= 1099511628211ull;
+    };
+    mix(g.min_filter);
+    mix(g.mag_filter);
+    mix(g.wrap_s);
+    mix(g.wrap_t);
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &g.min_lod, sizeof(bits));
+    mix(bits);
+    std::memcpy(&bits, &g.max_lod, sizeof(bits));
+    mix(bits);
+    return h;
+  }
+
+  // True when the unit's built sampler already matches g — caller must
+  // still set active_frag_unit_ (Draw's fallback reads it).
+  bool SamplerUpToDate(GLuint unit, const SamplerGL& g) const {
+    return g.smp_valid && g.built_token == SamplerToken(g) &&
+           frag_smps_.count(unit) != 0;
+  }
+
   std::map<std::uint32_t, SamplerGL> sampler_gl_;
   std::uint32_t active_frag_unit_ = 0;
   std::vector<std::uint32_t> sampler_slots_;  // MSL slot -> GL unit.
+  std::vector<std::uint32_t> vertex_sampler_slots_;  // MSL VS slot -> GL unit.
   float blend_color_[4] = {0, 0, 0, 0};
   std::vector<std::uint8_t> uniform_bytes_;
   std::map<GLuint, std::vector<std::uint8_t>> ubo_bytes_;  // block -> bytes.
   std::map<std::uint32_t, bool> handle_uses_sampler_;
+  std::map<std::uint32_t, bool> handle_uses_vertex_sampler_;
   std::map<std::string, bool> stencil_key_sampler_;
   std::map<std::string, backend::PsoKey> stencil_keys_;
   std::map<std::string, id<MTLLibrary>> trans_libs_;

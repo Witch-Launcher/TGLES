@@ -213,7 +213,9 @@ TEST(Final23Abi, ReadPixelsIsReal) {
   bindT(0x0DE1u, t);
   stor(0x0DE1u, 1, 0x8058u, 8, 8);
   genF(1, &f);
-  bindF(0x8CA9u, f);
+  // FRAMEBUFFER (0x8D40) binds read+draw: glReadPixels reads through the
+  // read binding, and a DRAW-only bind would leave it at the window FBO.
+  bindF(0x8D40u, f);
   attach(0x8CA9u, 0x8CE0u, 0x0DE1u, t, 0);
   unsigned char px[4 * 4 * 4] = {};
   read(0, 0, 4, 4, 0x1908u /*RGBA*/, 0x1401u /*UBYTE*/, px);

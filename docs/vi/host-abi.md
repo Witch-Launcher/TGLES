@@ -40,3 +40,26 @@ python3 tools/cts/preflight.py --lib build/libtgles.dylib  # F5 + sentinels + st
 ```
 
 Call nào không làm gì mà vẫn `NO_ERROR`, hỏi ledger: `tglesAbiGapCount/Name/Calls` cho biết đúng gap nào, bị gọi bao nhiêu lần.
+
+## Kéo log debug TGL vào file log của launcher
+
+Mọi đường fail-closed đều nêu lý do trên kênh `[TGL-DEBUG]`. `stderr`
+không bao giờ tới được file log của launcher trên iOS, nên cùng nội dung
+đó được giữ trong ring bộ nhớ có chặn (64 KB, cũ nhất rớt trước) để
+launcher poll — ví dụ mỗi giây một lần, hoặc ngay sau một frame đen:
+
+```objc
+// Resolve một lần (dlsym hay eglGetProcAddress đều được — contract đảm bảo).
+void (*setDebugLog)(int) = dlsym(lib, "tglHostSetDebugLog");
+int (*getDebugLog)(char *, int) = dlsym(lib, "tglHostGetDebugLog");
+// mode bitmask: 1 = stderr, 2 = ring nhớ, 0 = tắt hoàn toàn.
+setDebugLog(1 | 2);
+// ... chạy frames ...
+char buf[8192];
+int n = getDebugLog(buf, sizeof(buf));  // drain; NUL-terminated
+if (n > 0) appendToMyLogFile(buf);
+// Hỏi số byte đang chờ mà không drain: getDebugLog(NULL, 0).
+// Tắt hết (benchmark, release): setDebugLog(0).
+```
+
+Mode mặc định là `3` (cả hai cùng bật), đúng hành vi stderr cũ.

@@ -40,3 +40,27 @@ python3 tools/cts/preflight.py --lib build/libtgles.dylib  # F5 + sentinels + st
 ```
 
 If a call does nothing with `NO_ERROR`, ask the ledger: `tglesAbiGapCount/Name/Calls` tells you exactly which gap was hit and how often.
+
+## Pulling the TGL debug log into your own log file
+
+Every fail-closed path names its reason on the `[TGL-DEBUG]` channel
+(translator rejections, submit-stage failures, bridge allocation failures).
+`stderr` never reaches a launcher-owned log file on iOS, so the same text is
+kept in a bounded in-memory ring (64 KB, oldest drops first) that the
+launcher polls — e.g. once per second, or right after a black frame:
+
+```objc
+// Resolve once (dlsym or eglGetProcAddress — both agree by contract).
+void (*setDebugLog)(int) = dlsym(lib, "tglHostSetDebugLog");
+int (*getDebugLog)(char *, int) = dlsym(lib, "tglHostGetDebugLog");
+// mode bitmask: 1 = stderr sink, 2 = memory ring, 0 = fully silent.
+setDebugLog(1 | 2);
+// ... run frames ...
+char buf[8192];
+int n = getDebugLog(buf, sizeof(buf));  // drains; NUL-terminated
+if (n > 0) appendToMyLogFile(buf);
+// Query pending bytes without draining: getDebugLog(NULL, 0).
+// Silence everything (benchmarks, release): setDebugLog(0).
+```
+
+Default mode is `3` (both sinks on), matching historical stderr behavior.

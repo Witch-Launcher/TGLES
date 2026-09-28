@@ -233,6 +233,57 @@ TEST(EglLayer, WindowSurfaceNativeCheck) {
   EXPECT_EQ(egl.GetError(), tgles::kEglSuccess);
 }
 
+TEST(EglLayer, WindowSurfaceSizeFollowsHostAttach) {
+  // Regression for launcher logs showing "egl surface 0x0": window surfaces
+  // carry no WxH at creation; the Metal attach/resize path mirrors the
+  // drawable size so QuerySurface stays truthful for host readback probes.
+  tgles::EglState egl;
+  tgles::EGLDisplay dpy = egl.GetDisplay(nullptr);
+  egl.Initialize(dpy, nullptr, nullptr);
+  tgles::EGLConfig cfg = 0;
+  tgles::EGLint n = 0;
+  egl.ChooseConfig(dpy, PojavAttribs, &cfg, 1, &n);
+  int fake_window = 1;
+  tgles::EGLSurface surf =
+      egl.CreateWindowSurface(dpy, cfg, &fake_window, nullptr);
+  EXPECT_NE(surf, tgles::kEglNoSurface);
+  tgles::EGLint w = -1, h = -1;
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglWidth, &w));
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglHeight, &h));
+  EXPECT_EQ(w, 0);
+  EXPECT_EQ(h, 0);
+  egl.SetWindowSurfaceSize(2208, 1242);
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglWidth, &w));
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglHeight, &h));
+  EXPECT_EQ(w, 2208);
+  EXPECT_EQ(h, 1242);
+  // Non-positive sizes are ignored, never clobber the last good size.
+  egl.SetWindowSurfaceSize(0, 0);
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglWidth, &w));
+  EXPECT_EQ(w, 2208);
+}
+
+TEST(EglLayer, WindowSurfaceCreatedAfterAttachInheritsSize) {
+  // Hosts that tglHostAttachMetalLayer BEFORE eglCreateWindowSurface must
+  // not report 0x0 on the later surface (readback/skip gap in the launcher).
+  tgles::EglState egl;
+  tgles::EGLDisplay dpy = egl.GetDisplay(nullptr);
+  egl.Initialize(dpy, nullptr, nullptr);
+  tgles::EGLConfig cfg = 0;
+  tgles::EGLint n = 0;
+  egl.ChooseConfig(dpy, PojavAttribs, &cfg, 1, &n);
+  egl.SetWindowSurfaceSize(1280, 720);
+  int fake_window = 1;
+  tgles::EGLSurface surf =
+      egl.CreateWindowSurface(dpy, cfg, &fake_window, nullptr);
+  EXPECT_NE(surf, tgles::kEglNoSurface);
+  tgles::EGLint w = 0, h = 0;
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglWidth, &w));
+  EXPECT_TRUE(egl.QuerySurface(dpy, surf, tgles::kEglHeight, &h));
+  EXPECT_EQ(w, 1280);
+  EXPECT_EQ(h, 720);
+}
+
 // --- MakeCurrent (spec 3.7.3 error matrix) ---
 
 TEST(EglLayer, MakeCurrentMatrix) {

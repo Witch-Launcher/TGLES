@@ -73,6 +73,31 @@ TEST(Step03, CompileChecksVersionAndMain) {
   EXPECT_EQ(sm.GetError(), tgles::kGlNoError);
 }
 
+TEST(Step03, CompileAcceptsDesktopGlsl330) {
+  // MC 26 ships "#version 330 core" vertex+fragment pairs. Profile keyword
+  // is ignored; only the version number must be known.
+  tgles::ShaderManager sm;
+  const char* vs330 =
+      "#version 330 core\nlayout(location=0) in vec4 Position;\n"
+      "void main() { gl_Position = Position; }";
+  const char* fs330 =
+      "#version 330\nout vec4 fragColor;\nvoid main() { fragColor = "
+      "vec4(1.0); }";
+  tgles::GLuint v = Compile(sm, tgles::kGlVertexShader, vs330);
+  tgles::GLuint f = Compile(sm, tgles::kGlFragmentShader, fs330);
+  EXPECT_TRUE(sm.CompileSucceeded(v));
+  EXPECT_TRUE(sm.CompileSucceeded(f));
+  EXPECT_EQ(sm.ShaderVersion(v), 330);
+  EXPECT_EQ(sm.ShaderVersion(f), 330);
+  tgles::ProgramManager pm(&sm);
+  tgles::GLuint prog = pm.CreateProgram();
+  pm.AttachShader(prog, v);
+  pm.AttachShader(prog, f);
+  pm.LinkProgram(prog);
+  EXPECT_TRUE(pm.LinkSucceeded(prog));
+  EXPECT_EQ(pm.GetError(), tgles::kGlNoError);
+}
+
 TEST(Step03, AllSixStagesCreatable) {
   tgles::ShaderManager sm;
   EXPECT_NE(sm.CreateShader(tgles::kGlVertexShader), 0u);
@@ -116,6 +141,29 @@ TEST(Step03, LinkFailsWithoutVertex) {
   pm.LinkProgram(prog);
   EXPECT_FALSE(pm.LinkSucceeded(prog));
   EXPECT_TRUE(!pm.GetProgramInfoLog(prog).empty());
+}
+
+TEST(Step03, DeleteShaderWhileAttachedStillLinks) {
+  // MobileGL DirectGLES does glAttachShader → glDeleteShader → glLinkProgram
+  // (spec 7.1: delete only FLAGS while attached). Freeing the object here
+  // made CompileSucceeded fail and every MC program link with ok=0.
+  tgles::ShaderManager sm;
+  tgles::ProgramManager pm(&sm);
+  tgles::GLuint prog = pm.CreateProgram();
+  tgles::GLuint v = Compile(sm, tgles::kGlVertexShader, kVert320);
+  tgles::GLuint f = Compile(sm, tgles::kGlFragmentShader, kFrag320);
+  pm.AttachShader(prog, v);
+  pm.AttachShader(prog, f);
+  sm.DeleteShader(v);
+  sm.DeleteShader(f);
+  EXPECT_TRUE(sm.CompileSucceeded(v));
+  EXPECT_TRUE(sm.CompileSucceeded(f));
+  pm.LinkProgram(prog);
+  EXPECT_TRUE(pm.LinkSucceeded(prog));
+  // Free only after the program drops its references.
+  pm.DeleteProgram(prog);
+  EXPECT_EQ(sm.IsShader(v), tgles::kGlFalse);
+  EXPECT_EQ(sm.IsShader(f), tgles::kGlFalse);
 }
 
 TEST(Step03, LinkFailsOnMixedVersions) {

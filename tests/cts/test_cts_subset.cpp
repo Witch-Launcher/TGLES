@@ -332,6 +332,41 @@ TEST(CtsSubset, UniformBlockReflectionAndBinding) {
   EXPECT_EQ(pm.GetError(), tgles::kGlNoError);
 }
 
+// Precision-qualified + layout + comment-stripped reflection (MC desktop
+// GLSL 330 / ES 320 mixed styles). ParseLink used to miss these and the
+// facade then failed closed with sampler unit -1 / UBO not-found.
+TEST(CtsSubset, UniformReflectionPrecisionLayoutComments) {
+  tgles::ShaderManager sm;
+  tgles::ProgramManager pm(&sm);
+  const char* vs =
+      "#version 330 core\n"
+      "// trailing comment after uniform line\n"
+      "layout(location=0) in vec4 a_pos;\n"
+      "/* block comment */\n"
+      "layout(std140) uniform Camera /* mid */ {\n"
+      "  mat4 u_vp;\n"
+      "} cam;\n"
+      "void main(){ gl_Position = cam.u_vp * a_pos; }";
+  const char* fs =
+      "#version 330 core\n"
+      "precision mediump float;\n"
+      "layout(binding = 0) uniform mediump sampler2D Sprite;\n"
+      "uniform highp sampler2D Sampler0;\n"
+      "out vec4 o;\n"
+      "void main(){ o = texture(Sprite, vec2(0.5)) + texture(Sampler0, vec2(0.5)); }";
+  tgles::GLuint prog = pm.CreateProgram();
+  pm.AttachShader(prog, Compile(sm, tgles::kGlVertexShader, vs));
+  pm.AttachShader(prog, Compile(sm, tgles::kGlFragmentShader, fs));
+  pm.LinkProgram(prog);
+  EXPECT_TRUE(pm.LinkSucceeded(prog));
+  EXPECT_EQ(pm.GetUniformLocation(prog, "Sprite"), 0);
+  EXPECT_TRUE(pm.GetUniformLocation(prog, "Sampler0") >= 0);
+  tgles::GLint blocks = 0;
+  pm.GetProgramiv(prog, tgles::kGlActiveUniformBlocks, &blocks);
+  EXPECT_EQ(blocks, 1);
+  EXPECT_EQ(pm.GetUniformBlockIndex(prog, "Camera"), 0u);
+}
+
 // Core TextureShadowLod area: depth-compare sampler/texture state.
 TEST(CtsSubset, ShadowCompareState) {
   tgles::TextureManager tm;

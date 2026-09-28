@@ -31,6 +31,9 @@ bool NullMetalBridge::BeginFrame(GLsizei /*width*/, GLsizei /*height*/) {
   errors_.Record(kGlInvalidOperation);
   return false;
 }
+bool NullMetalBridge::FrameOpen() const { return false; }
+GLsizei NullMetalBridge::TargetWidth() const { return layer_width_; }
+GLsizei NullMetalBridge::TargetHeight() const { return layer_height_; }
 void NullMetalBridge::BeginRenderPass() {
   errors_.Record(kGlInvalidOperation);
 }
@@ -47,6 +50,10 @@ bool NullMetalBridge::CommitFrame() {
 }
 bool NullMetalBridge::Committed() const { return false; }
 GLuint NullMetalBridge::DrawCount() const { return 0; }
+void NullMetalBridge::SetClearColor(GLfloat, GLfloat, GLfloat, GLfloat) {
+  errors_.Record(kGlInvalidOperation);
+}
+void NullMetalBridge::SetClearAttachments(bool /*color*/, bool /*depth*/) {}
 void NullMetalBridge::SetVertexBytes(const void* /*data*/, std::size_t /*bytes*/,
                                      std::uint32_t /*stride*/) {
   errors_.Record(kGlInvalidOperation);
@@ -135,6 +142,10 @@ void NullMetalBridge::SetSamplerLod(GLuint /*unit*/, float /*min*/,
 }
 void NullMetalBridge::SetSamplerSlots(const GLuint* /*units*/,
                                        std::size_t /*count*/) {
+  errors_.Record(kGlInvalidOperation);
+}
+void NullMetalBridge::SetVertexSamplerSlots(const GLuint* /*units*/,
+                                             std::size_t /*count*/) {
   errors_.Record(kGlInvalidOperation);
 }
 void NullMetalBridge::SetMrtCount(GLsizei n) {
@@ -307,13 +318,38 @@ bool MockMetalBridge::BeginFrame(GLsizei width, GLsizei height) {
     errors_.Record(kGlInvalidOperation);
     return false;
   }
+  // Multi-draw reopen at the same size (mirror Apple bridge).
+  if (committed_ && target_width_ == width && target_height_ == height) {
+    committed_ = false;
+    frame_open_ = true;
+    render_open_ = false;
+    return true;
+  }
   frame_open_ = true;
   render_open_ = false;
   committed_ = false;
   draws_ = 0;
+  target_width_ = width;
+  target_height_ = height;
   // NOTE: vertex/MVP bindings persist across frames (GL VAO/uniform
   // semantics), mirroring the Apple bridge.
   return true;
+}
+
+bool MockMetalBridge::FrameOpen() const { return frame_open_; }
+GLsizei MockMetalBridge::TargetWidth() const { return target_width_; }
+GLsizei MockMetalBridge::TargetHeight() const { return target_height_; }
+void MockMetalBridge::SetClearColor(GLfloat r, GLfloat g, GLfloat b,
+                                    GLfloat a) {
+  clear_color_[0] = r;
+  clear_color_[1] = g;
+  clear_color_[2] = b;
+  clear_color_[3] = a;
+}
+
+void MockMetalBridge::SetClearAttachments(bool color, bool depth) {
+  clear_color_flag_ = color;
+  clear_depth_flag_ = depth;
 }
 
 void MockMetalBridge::BeginRenderPass() {
@@ -322,6 +358,14 @@ void MockMetalBridge::BeginRenderPass() {
     return;
   }
   render_open_ = true;
+  // Color-less clears (the facade's frame-start depth reset) are counted
+  // apart from real color clears: window-source tests assert PassClearCount
+  // means "the color buffer was wiped".
+  if (!clear_color_flag_ && clear_depth_flag_) {
+    ++pass_depth_clear_count_;
+    return;
+  }
+  ++pass_clear_count_;
 }
 
 void MockMetalBridge::Draw(GLenum mode) {
@@ -612,6 +656,18 @@ void MockMetalBridge::SetSamplerSlots(const GLuint* units, std::size_t count) {
   }
   sampler_slots_.assign(units, units + count);
 }
+void MockMetalBridge::SetVertexSamplerSlots(const GLuint* units,
+                                             std::size_t count) {
+  if (!initialized_) {
+    errors_.Record(kGlInvalidOperation);
+    return;
+  }
+  if (units == nullptr && count != 0) {
+    errors_.Record(kGlInvalidValue);
+    return;
+  }
+  vertex_sampler_slots_.assign(units, units + count);
+}
 void MockMetalBridge::SetMrtCount(GLsizei n) {
   if (!initialized_) {
     errors_.Record(kGlInvalidOperation);
@@ -636,6 +692,7 @@ void MockMetalBridge::BeginRenderPassNoClear() {
     return;
   }
   render_open_ = true;
+  ++pass_load_count_;
 }
 void MockMetalBridge::SetUboBytes(GLuint block, const void* data,
                                    std::size_t bytes) {
@@ -816,6 +873,17 @@ StencilConfig MockMetalBridge::LastStencilConfig() const {
   return stencil_cfg_;
 }
 
+bool NullMetalBridge::TextureProbe(GLuint /*unit*/, GLint /*x*/, GLint /*y*/,
+                                   std::uint8_t /*out_rgba*/[4]) {
+  errors_.Record(kGlInvalidOperation);
+  return false;
+}
+bool MockMetalBridge::TextureProbe(GLuint /*unit*/, GLint /*x*/, GLint /*y*/,
+                                   std::uint8_t /*out_rgba*/[4]) {
+  // Device-only (the Mock keeps no rasterized/uploaded pixels).
+  errors_.Record(kGlInvalidOperation);
+  return false;
+}
 bool MockMetalBridge::ReadbackPixel(GLint /*x*/, GLint /*y*/,
                                     std::uint8_t /*out_rgba*/[4]) {
   // No rasterizer in the Mock; pixels are device-only (Apple bridge).
@@ -853,6 +921,10 @@ bool MockMetalBridge::Present() {
   if (layer_ == nullptr || layer_width_ <= 0 || layer_height_ <= 0) {
     errors_.Record(kGlInvalidOperation);
     return false;
+  }
+  // Multi-draw: SubmitVertices may leave the frame open; seal before present.
+  if (frame_open_ && !render_open_ && !committed_) {
+    if (!CommitFrame()) return false;
   }
   if (!committed_) {
     errors_.Record(kGlInvalidOperation);

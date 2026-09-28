@@ -39,6 +39,17 @@ TEST(Step09, PsoKeyDistinguishesState) {
   EXPECT_FALSE(a == b);
 }
 
+TEST(Step09, PsoKeyDistinguishesSlot3) {
+  tgles::backend::PsoKey a, b;
+  EXPECT_TRUE(a == b);
+  b.slot3 = 2;
+  EXPECT_FALSE(a == b);
+  EXPECT_TRUE(a < b);  // Strict weak ordering includes slot3.
+  b = a;
+  b.slot2 = 2;
+  EXPECT_FALSE(a == b);
+}
+
 TEST(Step09, BufferStorageAdvice) {
   using tgles::backend::StorageMode;
   EXPECT_TRUE(tgles::backend::ResourcePlan::AdviseBufferStorage(

@@ -1,12 +1,19 @@
 #include "tgles/state/texture.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <set>
 
 #include "tgles/state/vertex_array.h"  // kGlUnsignedByte pixel type.
 
 namespace tgles {
+
+std::uint64_t NextTextureContentRevision() {
+  static std::atomic<std::uint64_t> next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 bool GlIsColorRenderable(GLenum internalformat) {
   // Mirrors TextureManager::IsColorRenderableSized (kept free so the FBO
@@ -619,6 +626,8 @@ void TextureManager::TexImage2D(GLenum target, GLint level, GLint internalformat
   TextureLevel lvl;
   lvl.defined = true;
   lvl.internalformat = static_cast<GLenum>(internalformat);
+  lvl.upload_format = format;
+  lvl.upload_type = type;
   lvl.width = width;
   lvl.height = height;
   lvl.depth = 1;
@@ -764,6 +773,9 @@ void TextureManager::TexSubImage2D(GLenum target, GLint level, GLint xoffset,
                 patch.data() + static_cast<std::size_t>(row) * width * 4,
                 static_cast<std::size_t>(width) * 4);
   }
+  lvl.upload_format = format;
+  lvl.upload_type = type;
+  lvl.revision = NextTextureContentRevision();
 }
 
 void TextureManager::TexSubImage3D(GLenum target, GLint level, GLint xoffset,
@@ -825,6 +837,7 @@ void TextureManager::TexSubImage3D(GLenum target, GLint level, GLint xoffset,
                   static_cast<std::size_t>(width) * 4);
     }
   }
+  lvl.revision = NextTextureContentRevision();
 }
 
 void TextureManager::CopyImageSubData(GLuint src_name, GLenum src_target,
@@ -938,6 +951,8 @@ void TextureManager::CopyImageSubData(GLuint src_name, GLenum src_target,
           kBpp;
       if (s + static_cast<std::size_t>(width) * kBpp > sl.pixels.size() ||
           d + static_cast<std::size_t>(width) * kBpp > dl.pixels.size()) {
+        // Earlier rows may already have landed — arm dst revision anyway.
+        dl.revision = NextTextureContentRevision();
         errors_.Record(kGlInvalidOperation);
         return;
       }
@@ -945,6 +960,7 @@ void TextureManager::CopyImageSubData(GLuint src_name, GLenum src_target,
                   static_cast<std::size_t>(width) * kBpp);
     }
   }
+  dl.revision = NextTextureContentRevision();
 }
 
 void TextureManager::CopyTexSubImage2D(GLenum target, GLint level,
@@ -1083,6 +1099,7 @@ void TextureManager::CompressedTexSubImage2D(GLenum target, GLint level,
     lit->second->pixels.assign(static_cast<const std::uint8_t*>(data),
                               static_cast<const std::uint8_t*>(data) +
                                   image_size);
+    lit->second->revision = NextTextureContentRevision();
   }
 }
 
@@ -1121,6 +1138,7 @@ void TextureManager::CompressedTexSubImage3D(
     lit->second->pixels.assign(static_cast<const std::uint8_t*>(data),
                               static_cast<const std::uint8_t*>(data) +
                                   image_size);
+    lit->second->revision = NextTextureContentRevision();
   }
 }
 
@@ -1665,6 +1683,24 @@ bool TextureManager::IsImmutable(GLuint texture) const {
   return it != textures_.end() && it->second.alive && it->second.immutable;
 }
 
+std::size_t TextureManager::TotalPixelBytes() const {
+  // Views alias the original's shared_ptr<TextureLevel>: count each storage
+  // exactly once so the number is a real footprint, not a per-name sum.
+  std::set<const TextureLevel*> seen;
+  std::size_t total = 0;
+  for (const auto& [name, tex] : textures_) {
+    if (!tex.alive) continue;
+    for (const auto& [face, levels] : tex.images) {
+      for (const auto& [level, img] : levels) {
+        if (img && seen.insert(img.get()).second) {
+          total += img->pixels.size();
+        }
+      }
+    }
+  }
+  return total;
+}
+
 bool TextureManager::FillLevel(GLuint texture, GLenum face_target,
                                GLint level, const std::uint8_t rgba[4]) {
   auto it = textures_.find(texture);
@@ -1686,6 +1722,7 @@ bool TextureManager::FillLevel(GLuint texture, GLenum face_target,
     lvl.pixels[i + 2] = rgba[2];
     lvl.pixels[i + 3] = rgba[3];
   }
+  lvl.revision = NextTextureContentRevision();
   return true;
 }
 
@@ -1789,6 +1826,18 @@ TextureLevel TextureManager::LevelState(GLuint texture, GLenum face_target,
   if (fit == it->second.images.end()) return TextureLevel();
   auto lit = fit->second.find(level);
   return lit == fit->second.end() ? TextureLevel() : *lit->second;
+}
+
+const TextureLevel* TextureManager::LevelStateRef(GLuint texture,
+                                                  GLenum face_target,
+                                                  GLint level) const {
+  auto it = textures_.find(texture);
+  if (it == textures_.end() || !it->second.alive) return nullptr;
+  auto fit = it->second.images.find(face_target);
+  if (fit == it->second.images.end()) return nullptr;
+  auto lit = fit->second.find(level);
+  if (lit == fit->second.end() || lit->second == nullptr) return nullptr;
+  return lit->second.get();
 }
 
 GLuint TextureManager::BoundTexture(GLenum target) const {

@@ -102,6 +102,8 @@ const Entry kTglTable[] = {
     TGL_EGL_ENTRY(tglHostPresent)
     TGL_EGL_ENTRY(tglHostReadbackPixel)
     TGL_EGL_ENTRY(tglHostFrameSerial)
+    TGL_EGL_ENTRY(tglHostSetDebugLog)
+    TGL_EGL_ENTRY(tglHostGetDebugLog)
 };
 // clang-format on
 

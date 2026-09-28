@@ -45,23 +45,27 @@ class DrawValidator {
   // attributes, missing target). Keeps facade GetError() coherent.
   void FlagBridgeError();
 
-  void DrawArrays(GLenum mode, GLint first, GLsizei count);
-  void DrawElements(GLenum mode, GLsizei count, GLenum type,
+  // Each Draw* returns true when THIS call's validation passed. Callers must
+  // gate execution on the return value, not HasPending(): a stale
+  // FlagBridgeError (or any prior queue entry) stays pending until GetError()
+  // and must not reject a later valid draw (ES 3.2 spec 2.3.1).
+  bool DrawArrays(GLenum mode, GLint first, GLsizei count);
+  bool DrawElements(GLenum mode, GLsizei count, GLenum type,
                     std::uintptr_t indices);
-  void DrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
+  bool DrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
                          GLenum type, std::uintptr_t indices);
-  void DrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
+  bool DrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                            GLsizei instancecount);
-  void DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
+  bool DrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              std::uintptr_t indices, GLsizei instancecount);
-  void DrawArraysIndirect(GLenum mode, std::uintptr_t indirect);
-  void DrawElementsIndirect(GLenum mode, GLenum type, std::uintptr_t indirect);
-  void DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
+  bool DrawArraysIndirect(GLenum mode, std::uintptr_t indirect);
+  bool DrawElementsIndirect(GLenum mode, GLenum type, std::uintptr_t indirect);
+  bool DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
                               std::uintptr_t indices, GLint basevertex);
-  void DrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end,
+  bool DrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end,
                                    GLsizei count, GLenum type,
                                    std::uintptr_t indices, GLint basevertex);
-  void DrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type,
+  bool DrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type,
                                        std::uintptr_t indices,
                                        GLsizei instancecount, GLint basevertex);
 
