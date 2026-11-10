@@ -1,0 +1,20 @@
+{
+  "project": "TGLES",
+  "repository": "https://github.com/Witch-Launcher/TGLES",
+  "webSection": "Projects",
+  "languages": ["en", "vi"],
+  "order": [
+    { "group": "Overview", "file": "README.md" },
+    { "group": "Architecture", "file": "architecture.md" },
+    { "group": "Host ABI", "file": "host-abi.md" },
+    { "group": "Host entries", "file": "host-entries.md" },
+    { "group": "Limits", "file": "limits.md" },
+    { "group": "Conformance", "file": "conformance.md" },
+    { "group": "MobileGL", "file": "mobilegl-matrix.md" },
+    { "group": "Minecraft", "file": "minecraft.md" },
+    { "group": "Viewer", "file": "viewer.md" },
+    { "group": "i18n", "file": "i18n.md" },
+    { "group": "Legal", "file": "privacy.md" },
+    { "group": "Legal", "file": "terms.md" }
+  ]
+}
