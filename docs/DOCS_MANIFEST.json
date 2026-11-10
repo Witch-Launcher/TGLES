@@ -1,8 +1,10 @@
 {
   "project": "TGLES",
   "repository": "https://github.com/Witch-Launcher/TGLES",
+  "branch": "main",
   "webSection": "Projects",
   "languages": ["en", "vi"],
+  "bases": { "en": "en/", "vi": "vi/" },
   "order": [
     { "group": "Overview", "file": "README.md" },
     { "group": "Architecture", "file": "architecture.md" },
